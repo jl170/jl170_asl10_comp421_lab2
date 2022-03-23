@@ -30,6 +30,7 @@ struct pcb *active_pcb;
 struct pcb *ready_pcb_head;  // queue
 struct pcb *ready_pcb_tail;
 struct pcb *blocked_pcb;  // one for each reason?
+struct pcb *idle_pcb;
 
 
 struct pcb {
@@ -176,7 +177,14 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     // The process should be a loop that executes the Pause machine instruction on each iteration
     // Can be loaded from a file using LoadProgram, or have it "built into" the rest of the code
         // initialize the pc value for this idle process to the address of the code for idle
-    info->pc = &idle_process;  // to run
+
+    
+    idle_pcb = malloc(sizeof(struct pcb));
+    idle_pcb->next = NULL;
+    idle_pcb->PT0 = malloc(sizeof(struct pte) * PAGE_TABLE_LEN);
+    idle_pcb->pid = 0;
+    
+    // loadprogram for idle
 
     // create the first "regular" process, (init process) and load the initial program into it.
     // guide yourself by the file load.template (shows procedure how to load executalble from a Linux file into memory as Yalnix Process)
@@ -184,12 +192,13 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     // To run initial program you should put file name if the init program on the command line when your run your kernel. It will then be passed to
     // KernelStart as one of the cmd_args strings
     
-    // just call loadprogram with correct filename? <- from cmd_args string
     
     active_pcb = malloc(sizeof(struct pcb));
     active_pcb->next = NULL;
     active_pcb->PT0 = pageTable0;
     active_pcb->pid = 1;
+    
+    // just call loadprogram with correct filename? <- from cmd_args string
     
 
     // return from KernelStart routine. The machine will begin running the program defined by the current page tables and by the
@@ -316,9 +325,11 @@ LoadProgram(char *name, char **args)
      *  And make sure there will be enough *physical* memory to
      *  load the new program.
      */
-    //for (j = MEM_INVALID_PAGES; j < KERNEL_STACK_BASE; j++) {
-    //    if (pageTable0
-    //}
+//    for (j = MEM_INVALID_PAGES; j < KERNEL_STACK_BASE; j++) {
+//        // will all be invalid for init and idle
+//        if (active_pcb->PT0
+//    }
+            
     >>>> The new program will require text_npg pages of text,
     >>>> data_bss_npg pages of data/bss, and stack_npg pages of
     >>>> stack.  In checking that there is enough free physical
