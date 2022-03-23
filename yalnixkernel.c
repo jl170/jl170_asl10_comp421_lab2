@@ -104,6 +104,9 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     // when you free a page, add it back to the linked list. When you allocate it, remove it from the linked list.
 
     // Build the initial page tabels for Region 0 and Region 1
+
+    origBreak = (uintptr_t) orig_brk;
+
     for (i = 0; i < KERNEL_STACK_BASE >> PAGESHIFT; i++) {
         struct pte entry;
         entry.valid = 0;
@@ -126,7 +129,7 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
         entry.pfn = i;
         pageTable1[i] = entry;
     }
-    for (i = &_etext >> PAGESHIFT; i < orig_brk >> PAGESHIFT; i++) {
+    for (i = &_etext >> PAGESHIFT; i < (uintptr_t) orig_brk >> PAGESHIFT; i++) {
         struct pte entry;
         entry.valid = 1;
         entry.kprot = (PROT_READ|PROT_WRITE);
@@ -134,10 +137,15 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
         entry.pfn = i;
         pageTable1[i] = entry;
     }
+    for (origBreak = ((uintptr_t) orig_brk) >> PAGESHIFT; origBreak < VMEM_LIMIT >> PAGESHIFT; origBreak++) {
+        struct pte entry;
+        entry.valid = 0;
+        pageTable1[origBreak] = entry;
+    }
 
     // Initialize registers REG_PTR0 and REG_PTR1 to define these initial page tables
     WriteRegister(REG_PTR0, (RCS421RegVal) &pageTable0[0]);
-    WriteRegister(REG_PTR0, (RCS421RegVal) &pageTable1[0]);
+    WriteRegister(REG_PTR1, (RCS421RegVal) &pageTable1[0]);
 
     // Enable virtual memory
     WriteRegister(REG_VM_ENABLE, 1); //cast to RCS421RegVal?
