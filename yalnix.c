@@ -33,6 +33,7 @@ struct pcb *ready_pcb_tail;
 struct pcb *blocked_pcb;  // one for each reason?
 struct pcb *idle_pcb;
 
+int countargs;
 
 struct pcb {
     int pid;
@@ -79,6 +80,7 @@ void TRAP_TRANSMIT_handler(ExceptionInfo *info)
 int
 SetKernelBrk(void *addr)
 {
+    TracePrintf(0, "BIG DUDU\n");
     (void) addr;
     return 0;
 }
@@ -94,12 +96,6 @@ SetKernelBrk(void *addr)
  */
 void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, char **cmd_args)
 {
-    int countargs = 0;
-    while (strcmp(cmd_args[countargs], "\0") != 0) {
-        TracePrintf(0, "%s", cmd_args[countargs]);
-        countargs += 1;
-    }
-    TracePrintf(0, "%s", cmd_args[0]);
     unsigned int i;
     uintptr_t nextPage, origBreak;
     // Remeber: virtual memory is not enabled here
@@ -158,25 +154,28 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     }
 
     for (i = VMEM_0_LIMIT >> PAGESHIFT; i < ((uintptr_t) &_etext) >> PAGESHIFT; i++) {
+        TracePrintf(0, "allocating text: %d\n", i);
         struct pte entry;
         entry.valid = 1;
         entry.kprot = (PROT_READ|PROT_EXEC);
         entry.uprot = PROT_NONE;
         entry.pfn = i;
-        pageTable1[i] = entry;
+        pageTable1[i - PAGE_TABLE_LEN] = entry;
     }
     for (i = ((uintptr_t) &_etext) >> PAGESHIFT; i < (uintptr_t) orig_brk >> PAGESHIFT; i++) {
+        TracePrintf(0, "allocating databss: %d\n", i);
         struct pte entry;
         entry.valid = 1;
         entry.kprot = (PROT_READ|PROT_WRITE);
         entry.uprot = PROT_NONE;
         entry.pfn = i;
-        pageTable1[i] = entry;
+        pageTable1[i - PAGE_TABLE_LEN] = entry;
     }
     for (origBreak = ((uintptr_t) orig_brk) >> PAGESHIFT; origBreak < VMEM_LIMIT >> PAGESHIFT; origBreak++) {
+        TracePrintf(0, "setting rest to zero: %d\n", i);
         struct pte entry;
         entry.valid = 0;
-        pageTable1[origBreak] = entry;
+        pageTable1[origBreak - PAGE_TABLE_LEN] = entry;
     }
     
 
@@ -185,6 +184,12 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     WriteRegister(REG_PTR1, (RCS421RegVal) &pageTable1[0]);
 
     // Enable virtual memory
+    for (i = 0; i < PAGE_TABLE_LEN; i++) {
+        TracePrintf(0, "%d, %d \n", i, pageTable0[i].valid);
+    }
+    for (i = 0; i < PAGE_TABLE_LEN; i++) {
+        TracePrintf(0, "%d, %d \n", i, pageTable1[i].valid);
+    }
     WriteRegister(REG_VM_ENABLE, 1); //cast to RCS421RegVal?
 
     // create an "idle" process to be run by the kernel when there are no other runnable (ready) processes in the system.
@@ -213,14 +218,8 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     active_pcb->pid = 1;
 
     (void) info;
-    
-    // just call loadprogram with correct filename? <- from cmd_args string
-    
-
-    // return from KernelStart routine. The machine will begin running the program defined by the current page tables and by the
-    // values returned in the ExceptionInfo structure
+    (void) cmd_args;
     return;
-
 }
 
 
