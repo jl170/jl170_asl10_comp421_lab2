@@ -208,7 +208,7 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
 }
 
 
-uintptr_t get_free_page() {  // return physical address of next free page
+int get_free_page() {  // return pfn of next free page
     if (freePage <= 0) {
         return -1;
     }
@@ -230,7 +230,7 @@ uintptr_t get_free_page() {  // return physical address of next free page
     nextFreePage = (uintptr_t) (VMEM_1_LIMIT - PAGESIZE);
     
     //4. decrease freePage by 1
-    freePage -= 1;
+    freePages -= 1;
     
     //5. restore PTE
     pageTable1[PAGE_TABLE_LEN - 1].kprot = svdPTE.kprot;
@@ -239,10 +239,29 @@ uintptr_t get_free_page() {  // return physical address of next free page
     
     //6. Flush from TLB
     WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) (VMEM_1_LIMIT - PAGESIZE));
-    return svdPage;
+    int ret = svdPage >> PAGESHIFT;
+    return ret;
 }
 
-void free_physical_page
+void free_physical_page(int index) {
+    // Set the first offset of the page of the address to the previous nextfreepage
+    uintptr_t addrNum = 0;
+    addrNum += index << PAGESHIFT;
+    uintptr_t *actualAddr = (uintptr_t *) addrNum;
+    *actualAddr = nextFreePage;
+    
+    // set nextFreePage to the physical address of the pfn of the page to be freed
+    nextFreePage = (uintptr_t) ((active_pcb->PT0[index]->pfn) << PAGESHIFT);
+    
+    // increment freePages
+    freePages += 1;
+    
+    // flush tlb
+    WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) (addrNum));
+    
+    // set valid bit to 0
+    active_pcb->PT0[index]->valid = 0;
+}
 
 
 void idle_process() {
@@ -414,8 +433,8 @@ LoadProgram(char *name, char **args, ExceptionInfo *info)
     for (j = MEM_INVALID_PAGES; j < KERNEL_STACK_BASE; j++) {
         // will all be invalid for init and idle
         if (active_pcb->PT0[j]->valid) {
-            // TODO: free physical memory
-            active_pcb->PT0[j]->valid = 0;  // set invalid
+            free_physical_page(j);
+            //active_pcb->PT0[j]->valid = 0;  // set invalid
         }
     }
     
@@ -445,7 +464,7 @@ LoadProgram(char *name, char **args, ExceptionInfo *info)
         active_pcb->PT0[j]->valid = 1;
         active_pcb->PT0[j]->kprot = PROT_READ | PROT_WRITE;
         active_pcb->PT0[j]->uprot = PROT_READ | PROT_EXEC;
-//        active_pcb->PT0[j]->pfn = ; // TODO: new page of physical memory
+        active_pcb->PT0[j]->pfn = get_free_page();
     }
 
     /* Then the data and bss pages */
@@ -460,7 +479,7 @@ LoadProgram(char *name, char **args, ExceptionInfo *info)
         active_pcb->PT0[j]->valid = 1;
         active_pcb->PT0[j]->kprot = PROT_READ | PROT_WRITE;
         active_pcb->PT0[j]->uprot = PROT_READ | PROT_WRITE;
-//        active_pcb->PT0[j]->pfn = ; // TODO: new page of physical memory
+        active_pcb->PT0[j]->pfn = get_free_page();
     }
 
     /* And finally the user stack pages */
@@ -478,7 +497,7 @@ LoadProgram(char *name, char **args, ExceptionInfo *info)
         active_pcb->PT0[j]->valid = 1;
         active_pcb->PT0[j]->kprot = PROT_READ | PROT_WRITE;
         active_pcb->PT0[j]->uprot = PROT_READ | PROT_WRITE;
-//        active_pcb->PT0[j]->pfn = ; // TODO: new page of physical memory
+        active_pcb->PT0[j]->pfn = get_free_page();
         j -= 1;
     }
 
