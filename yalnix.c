@@ -51,36 +51,43 @@ struct pcb {
 
 void TRAP_KERNEL_handler(ExceptionInfo *info)
 {
+    TracePrintf(0, "In TRAP_KERNEL_handler");
     (void) info;
 }
 
 void TRAP_CLOCK_handler(ExceptionInfo *info)
 {
+    TracePrintf(0, "In TRAP_CLOCK_handler");
     (void) info;
 }
 
 void TRAP_ILLEGAL_handler(ExceptionInfo *info)
 {
+    TracePrintf(0, "In TRAP_ILLEGAL_handler");
     (void) info;
 }
 
 void TRAP_MEMORY_handler(ExceptionInfo *info)
 {
+    TracePrintf(0, "In TRAP_MEMORY_handler");
     (void) info;
 }
 
 void TRAP_MATH_handler(ExceptionInfo *info)
 {
+    TracePrintf(0, "In TRAP_MATH_handler");
     (void) info;
 }
 
 void TRAP_TTY_RECEIVE_handler(ExceptionInfo *info)
 {
+    TracePrintf(0, "In TRAP_TTY_RECEIVE_handler");
     (void) info;
 }
 
 void TRAP_TRANSMIT_handler(ExceptionInfo *info)
 {
+    TracePrintf(0, "In TRAP_TRANSMIT_handler");
     (void) info;
 }
 
@@ -146,6 +153,9 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
 
     // Intialize the REG_VECTOR_BASE privileged machine register to point to your interrupt vector table
     WriteRegister(REG_VECTOR_BASE, (RCS421RegVal) &handlers[0]);
+    TracePrintf(0, "Interrupt vector: %d\n", (int)(uintptr_t) handlers[3]);
+    TracePrintf(0, "Interrupt vector: %d\n", (int)(uintptr_t) handlers[4]);
+    TracePrintf(0, "Interrupt vector: %d\n", (int)(uintptr_t) TRAP_VECTOR_SIZE);
     struct pte *pageTable0 = malloc(sizeof(struct pte) * PAGE_TABLE_LEN);  // need to malloc before building page table structures
     //kernel_brk += 4096;
     // Build a structure to keep track of what page frames in physical memory are free
@@ -258,6 +268,7 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     active_pcb->PT0 = pageTable0;
     active_pcb->pid = 1;
 
+    TracePrintf(0, "Starting loadProgram\n");
     LoadProgram(cmd_args[0], cmd_args, info);
     return;
 }
@@ -446,7 +457,7 @@ LoadProgram(char *name, char **args, ExceptionInfo *info)
          *  And make sure there will be enough physical memory to
          *  load the new program.
          */
-    for (j = MEM_INVALID_PAGES; j < KERNEL_STACK_BASE; j++) {
+    for (j = MEM_INVALID_PAGES >> PAGESHIFT; j < KERNEL_STACK_BASE >> PAGESHIFT; j++) {
         // will all be invalid for init and idle
         if (active_pcb->PT0[j].valid) {
             toBeFreePages += 1;
@@ -488,7 +499,7 @@ LoadProgram(char *name, char **args, ExceptionInfo *info)
 //    >>>> memory page indicated by that PTEs pfn field.  Set all
 //    >>>> of these PTEs to be no longer valid.
     
-    for (j = MEM_INVALID_PAGES; j < KERNEL_STACK_BASE; j++) {
+    for (j = MEM_INVALID_PAGES >> PAGESHIFT; j < KERNEL_STACK_BASE >> PAGESHIFT; j++) {
         // will all be invalid for init and idle
         if (active_pcb->PT0[j].valid) {
             free_physical_page(j);
@@ -558,7 +569,7 @@ LoadProgram(char *name, char **args, ExceptionInfo *info)
         active_pcb->PT0[j].pfn = get_free_page();
         j -= 1;
     }
-
+    TracePrintf(0, "Page table setting all done \n");
     /*
      *  All pages for the new address space are now in place.  Flush
      *  the TLB to get rid of all the old PTEs from this process, so
@@ -634,7 +645,7 @@ LoadProgram(char *name, char **args, ExceptionInfo *info)
         info->regs[j] = 0;
     }
     info->psr = 0;
-        
+    TracePrintf(0, "Returning from LoadProgram...");
     return (0);
 }
 
