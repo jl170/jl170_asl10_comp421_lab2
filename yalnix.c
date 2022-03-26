@@ -52,42 +52,49 @@ struct pcb {
 void TRAP_KERNEL_handler(ExceptionInfo *info)
 {
     TracePrintf(0, "In TRAP_KERNEL_handler");
+    Halt();
     (void) info;
 }
 
 void TRAP_CLOCK_handler(ExceptionInfo *info)
 {
     TracePrintf(0, "In TRAP_CLOCK_handler");
+    Halt();
     (void) info;
 }
 
 void TRAP_ILLEGAL_handler(ExceptionInfo *info)
 {
     TracePrintf(0, "In TRAP_ILLEGAL_handler");
+    Halt();
     (void) info;
 }
 
 void TRAP_MEMORY_handler(ExceptionInfo *info)
 {
     TracePrintf(0, "In TRAP_MEMORY_handler");
+    Halt();
     (void) info;
 }
 
 void TRAP_MATH_handler(ExceptionInfo *info)
 {
     TracePrintf(0, "In TRAP_MATH_handler");
+    Halt();
     (void) info;
 }
 
 void TRAP_TTY_RECEIVE_handler(ExceptionInfo *info)
 {
     TracePrintf(0, "In TRAP_TTY_RECEIVE_handler");
+    Halt();
     (void) info;
 }
 
 void TRAP_TRANSMIT_handler(ExceptionInfo *info)
 {
     TracePrintf(0, "In TRAP_TRANSMIT_handler");
+    Halt();
     (void) info;
 }
 
@@ -142,8 +149,10 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     kernel_brk = orig_brk;
     
     // Initialize interrupt vector table entries for each type of interrupt, exception, or trap
-    void **handlers = calloc(TRAP_VECTOR_SIZE, 1);
-    handlers[TRAP_KERNEL] = TRAP_KERNEL_handler;
+    //void (*handlers[TRAP_VECTOR_SIZE])(ExceptionInfo*) = calloc(TRAP_VECTOR_SIZE, 4);
+    void **handlers = calloc(TRAP_VECTOR_SIZE, 4);
+    TracePrintf(0, "Interrupt vector: %d\n", (int)(uintptr_t) handlers[3]);
+    handlers[TRAP_KERNEL] = &TRAP_KERNEL_handler;
     handlers[TRAP_CLOCK] = &TRAP_CLOCK_handler;
     handlers[TRAP_ILLEGAL] = &TRAP_ILLEGAL_handler;
     handlers[TRAP_MEMORY] = &TRAP_MEMORY_handler;
