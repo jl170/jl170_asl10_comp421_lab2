@@ -22,9 +22,13 @@ void TRAP_TTY_RECEIVE_handler(ExceptionInfo *info);
 void TRAP_TRANSMIt_handler(ExceptionInfo *info);
 
 void idle_process();
+int get_free_page();
+int LoadProgram(char *name, char **args, ExceptionInfo *info);
+
 
 bool vm_enabled = false;  // indicates if virtual memory has been enabled, used in SetKernelBrk
 void *kernel_brk;  // first address not part of kernel heap
+int setKernelBrkCount = 0;
 
 int freePages = 0;
 uintptr_t nextFreePage;
@@ -93,21 +97,23 @@ void TRAP_TRANSMIT_handler(ExceptionInfo *info)
 int
 SetKernelBrk(void *addr)
 {
-    TracePrintf(0, "SetKernelBrk called\n");
-    
+    //racePrintf(0, "SetKernelBrk called\n");
+    //racePrintf(0, "attempt to change kernel_brk to : %d\n", (int) (uintptr_t)addr);
     unsigned int i;
     
     if (vm_enabled) {  // virtual memory enabled, allocate page frame and map
         // from vpn of current kernel_brk to vpn of addr
-        for (i = (uintptr_t) (kernel_brk >> PAGESHIFT); i < (uintptr_t) (addr >> PAGESHIFT); i++) {
+        for (i = (uintptr_t) kernel_brk >> PAGESHIFT; i < (uintptr_t) addr >> PAGESHIFT; i++) {
             // make the PTE valid
             pageTable1[i - PAGE_TABLE_LEN].valid = 1;
+            pageTable1[i - PAGE_TABLE_LEN].uprot = PROT_NONE;
+            pageTable1[i - PAGE_TABLE_LEN].kprot = PROT_READ | PROT_WRITE;
             pageTable1[i - PAGE_TABLE_LEN].pfn = get_free_page();
         }
     }
-    
     // if vm not enabled, simply move break location to addr
     kernel_brk = addr;
+    
     
     return 0;
 }
@@ -126,7 +132,6 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     unsigned int i;
     uintptr_t nextPage, kernelBreak;
     // Remeber: virtual memory is not enabled here
-    
     kernel_brk = orig_brk;
     
     // Initialize interrupt vector table entries for each type of interrupt, exception, or trap
@@ -141,9 +146,8 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
 
     // Intialize the REG_VECTOR_BASE privileged machine register to point to your interrupt vector table
     WriteRegister(REG_VECTOR_BASE, (RCS421RegVal) &handlers[0]);
-    
     struct pte *pageTable0 = malloc(sizeof(struct pte) * PAGE_TABLE_LEN);  // need to malloc before building page table structures
-
+    //kernel_brk += 4096;
     // Build a structure to keep track of what page frames in physical memory are free
         // use linked list of physical frames, implemented in frames themselves
         // or a separate structure
@@ -187,7 +191,7 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     }
 
     for (i = VMEM_0_LIMIT >> PAGESHIFT; i < ((uintptr_t) &_etext) >> PAGESHIFT; i++) {
-        TracePrintf(0, "allocating text: %d\n", i);
+        //racePrintf(0, "allocating text: %d\n", i);
         struct pte entry;
         entry.valid = 1;
         entry.kprot = (PROT_READ|PROT_EXEC);
@@ -198,7 +202,7 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     // TODO: to orig_brk no longer accurate due to malloc
 //    for (i = ((uintptr_t) &_etext) >> PAGESHIFT; i < (uintptr_t) orig_brk >> PAGESHIFT; i++) {
     for (i = ((uintptr_t) &_etext) >> PAGESHIFT; i < (uintptr_t) kernel_brk >> PAGESHIFT; i++) {
-        TracePrintf(0, "allocating databss: %d\n", i);
+        //racePrintf(0, "allocating databss: %d\n", i);
         struct pte entry;
         entry.valid = 1;
         entry.kprot = (PROT_READ|PROT_WRITE);
@@ -208,7 +212,7 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     }
 //    for (origBreak = ((uintptr_t) orig_brk) >> PAGESHIFT; origBreak < VMEM_LIMIT >> PAGESHIFT; origBreak++) {
     for (kernelBreak = ((uintptr_t) kernel_brk) >> PAGESHIFT; kernelBreak < VMEM_LIMIT >> PAGESHIFT; kernelBreak++) {
-        TracePrintf(0, "setting rest to zero: %d\n", i);
+        //racePrintf(0, "setting rest to zero: %d\n", i);
         struct pte entry;
         entry.valid = 0;
         pageTable1[kernelBreak - PAGE_TABLE_LEN] = entry;
@@ -220,12 +224,12 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     WriteRegister(REG_PTR1, (RCS421RegVal) &pageTable1[0]);
 
     // Enable virtual memory
-    for (i = 0; i < PAGE_TABLE_LEN; i++) {
-        TracePrintf(0, "%d, %d \n", i, pageTable0[i].valid);
-    }
-    for (i = 0; i < PAGE_TABLE_LEN; i++) {
-        TracePrintf(0, "%d, %d \n", i, pageTable1[i].valid);
-    }
+    // for (i = 0; i < PAGE_TABLE_LEN; i++) {
+    //     racePrintf(0, "%d, %d \n", i, pageTable0[i].valid);
+    // }
+    // for (i = 0; i < PAGE_TABLE_LEN; i++) {
+    //     racePrintf(0, "%d, %d \n", i, pageTable1[i].valid);
+    // }
     WriteRegister(REG_VM_ENABLE, 1); //cast to RCS421RegVal?
     vm_enabled = true;
 
@@ -254,8 +258,7 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     active_pcb->PT0 = pageTable0;
     active_pcb->pid = 1;
 
-    (void) info;
-    (void) cmd_args;
+    LoadProgram(cmd_args[0], cmd_args, info);
     return;
 }
 
