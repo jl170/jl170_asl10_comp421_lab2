@@ -314,6 +314,7 @@ int get_free_page() {
     
     //1. save nextFreePage
     uintptr_t svdPage = nextFreePage;
+//    TracePrintf(0, "initial nextFreePage %d\n", nextFreePage);
     //2. Go to PTE indexed by PAGE_TABLE_LEN - 1
         // and save values of the PTE first,
         // plug in nextFreePage >> PAGESHIFT in pfn field
@@ -326,8 +327,8 @@ int get_free_page() {
     pageTable1[PAGE_TABLE_LEN - 1].kprot = PROT_READ | PROT_WRITE;
     
     //3. access VMEM_1_LIMIT - PAGESIZE and set nextFreePage to be that
-    nextFreePage = (uintptr_t) (VMEM_1_LIMIT - PAGESIZE);
-    
+    nextFreePage = *((uintptr_t *) (VMEM_1_LIMIT - PAGESIZE));
+//    TracePrintf(0, "new nextFreePage %d\n", nextFreePage);
     //4. decrease freePage by 1
     freePages -= 1;
     
@@ -339,6 +340,7 @@ int get_free_page() {
     //6. Flush from TLB
     WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) (VMEM_1_LIMIT - PAGESIZE));
     int ret = svdPage >> PAGESHIFT;
+//    TracePrintf(0, "getFreePage returns pfn: %d\n", ret);
     return ret;
 }
 
@@ -612,8 +614,16 @@ LoadProgram(char *name, char **args, ExceptionInfo *info, struct pcb *loadPcb)
     WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) TLB_FLUSH_0);
 
     loadPcb->stackAddr = (void *) (uintptr_t) ((j+1) << PAGESHIFT);
+    
+    TracePrintf(0, "brkAddr: %d, stackAddr: %d\n", (uintptr_t) loadPcb->brkAddr, (uintptr_t) loadPcb->stackAddr);
 
     TracePrintf(0, "Page table setting all done \n");
+    
+    for (k = VMEM_0_BASE >> PAGESHIFT; k < VMEM_0_LIMIT >> PAGESHIFT; k++) {
+        TracePrintf(0, "page: %d, pfn: %d\n", k, (uintptr_t) loadPcb->PT0[k].pfn);
+    }
+    
+    
     /*
      *  All pages for the new address space are now in place.  Flush
      *  the TLB to get rid of all the old PTEs from this process, so
