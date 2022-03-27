@@ -11,20 +11,6 @@
 #include <sys/mman.h>
 #include <stdbool.h>
 
-void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, char **cmd_args);
-
-void TRAP_KERNEL_handler(ExceptionInfo *info);
-void TRAP_CLOCK_handler(ExceptionInfo *info);
-void TRAP_ILLEGAL_handler(ExceptionInfo *info);
-void TRAP_MEMORY_handler(ExceptionInfo *info);
-void TRAP_MATH_handler(ExceptionInfo *info);
-void TRAP_TTY_RECEIVE_handler(ExceptionInfo *info);
-void TRAP_TRANSMIt_handler(ExceptionInfo *info);
-
-void idle_process();
-int get_free_page();
-int LoadProgram(char *name, char **args, ExceptionInfo *info);
-
 
 bool vm_enabled = false;  // indicates if virtual memory has been enabled, used in SetKernelBrk
 void *kernel_brk;  // first address not part of kernel heap
@@ -47,53 +33,85 @@ struct pcb {
     SavedContext *ctx;
     struct pte *PT0; // virtual address of its page table
     struct pcb *next;
+    void *brkAddr;
+    void *stackAddr;
 };
+
+void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, char **cmd_args);
+
+void TRAP_KERNEL_handler(ExceptionInfo *info);
+void TRAP_CLOCK_handler(ExceptionInfo *info);
+void TRAP_ILLEGAL_handler(ExceptionInfo *info);
+void TRAP_MEMORY_handler(ExceptionInfo *info);
+void TRAP_MATH_handler(ExceptionInfo *info);
+void TRAP_TTY_RECEIVE_handler(ExceptionInfo *info);
+void TRAP_TRANSMIt_handler(ExceptionInfo *info);
+
+void idle_process();
+int get_free_page();
+int LoadProgram(char *name, char **args, ExceptionInfo *info, struct pcb *loadPcb);
 
 void TRAP_KERNEL_handler(ExceptionInfo *info)
 {
-    TracePrintf(0, "In TRAP_KERNEL_handler");
+    TracePrintf(0, "In TRAP_KERNEL_handler\n");
     Halt();
     (void) info;
 }
 
 void TRAP_CLOCK_handler(ExceptionInfo *info)
 {
-    TracePrintf(0, "In TRAP_CLOCK_handler");
+    TracePrintf(0, "In TRAP_CLOCK_handler\n");
     Halt();
     (void) info;
 }
 
 void TRAP_ILLEGAL_handler(ExceptionInfo *info)
 {
-    TracePrintf(0, "In TRAP_ILLEGAL_handler");
+    TracePrintf(0, "In TRAP_ILLEGAL_handler\n");
     Halt();
     (void) info;
 }
 
 void TRAP_MEMORY_handler(ExceptionInfo *info)
 {
-    TracePrintf(0, "In TRAP_MEMORY_handler");
-    Halt();
-    (void) info;
+    TracePrintf(0, "In TRAP_MEMORY_handler with addr: %d %d %d %d %d %d\n", (uintptr_t) info->addr, (uintptr_t) info->code, SEGV_MAPERR, SEGV_ACCERR, SI_KERNEL, SI_USER);
+    // if address is below the user stack and above the brk + 1 page, then
+    if (info->addr < active_pcb->stackAddr && info->addr > active_pcb->brkAddr) {
+        // grow the user stack to cover the address
+        while (active_pcb->stackAddr > info->addr) {
+            active_pcb->stackAddr -= PAGESIZE;
+            struct pte *validNow = &active_pcb->PT0[(uintptr_t)(active_pcb->stackAddr) >> PAGESHIFT];
+            validNow->valid = 1;
+            validNow->uprot = PROT_READ | PROT_WRITE;
+            validNow->kprot = PROT_READ | PROT_WRITE;
+            validNow->pfn = get_free_page();
+            WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) (active_pcb->stackAddr));
+        }
+
+    } else {
+        // In all other cases, terminate the process
+        TracePrintf(0, "In TRAP_MEMORY_handler else\n" );
+
+    }
 }
 
 void TRAP_MATH_handler(ExceptionInfo *info)
 {
-    TracePrintf(0, "In TRAP_MATH_handler");
+    TracePrintf(0, "In TRAP_MATH_handler\n");
     Halt();
     (void) info;
 }
 
 void TRAP_TTY_RECEIVE_handler(ExceptionInfo *info)
 {
-    TracePrintf(0, "In TRAP_TTY_RECEIVE_handler");
+    TracePrintf(0, "In TRAP_TTY_RECEIVE_handler\n");
     Halt();
     (void) info;
 }
 
 void TRAP_TRANSMIT_handler(ExceptionInfo *info)
 {
-    TracePrintf(0, "In TRAP_TRANSMIT_handler");
+    TracePrintf(0, "In TRAP_TRANSMIT_handler\n");
     Halt();
     (void) info;
 }
@@ -123,6 +141,7 @@ SetKernelBrk(void *addr)
             pageTable1[i - PAGE_TABLE_LEN].uprot = PROT_NONE;
             pageTable1[i - PAGE_TABLE_LEN].kprot = PROT_READ | PROT_WRITE;
             pageTable1[i - PAGE_TABLE_LEN].pfn = get_free_page();
+            WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) (i << PAGESHIFT));
         }
     }
     // if vm not enabled, simply move break location to addr
@@ -156,6 +175,7 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     handlers[TRAP_CLOCK] = &TRAP_CLOCK_handler;
     handlers[TRAP_ILLEGAL] = &TRAP_ILLEGAL_handler;
     handlers[TRAP_MEMORY] = &TRAP_MEMORY_handler;
+    //TracePrintf(0, "Addr or memory handler: %d\n", (uintptr_t) &TRAP_MEMORY_handler);
     handlers[TRAP_MATH] = &TRAP_MATH_handler;
     handlers[TRAP_TTY_RECEIVE] = &TRAP_TTY_RECEIVE_handler;
     handlers[TRAP_TTY_TRANSMIT] = &TRAP_TRANSMIT_handler;
@@ -258,10 +278,10 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
         // initialize the pc value for this idle process to the address of the code for idle
 
     
-    idle_pcb = malloc(sizeof(struct pcb));
-    idle_pcb->next = NULL;
-    idle_pcb->PT0 = malloc(sizeof(struct pte) * PAGE_TABLE_LEN);
-    idle_pcb->pid = 0;
+    // idle_pcb = malloc(sizeof(struct pcb));
+    // idle_pcb->next = NULL;
+    // idle_pcb->PT0 = malloc(sizeof(struct pte) * PAGE_TABLE_LEN);
+    // idle_pcb->pid = 0;
     
     // loadprogram for idle
 
@@ -278,7 +298,8 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     active_pcb->pid = 1;
 
     TracePrintf(0, "Starting loadProgram\n");
-    LoadProgram(cmd_args[0], cmd_args, info);
+    LoadProgram(cmd_args[0], cmd_args, info, active_pcb);
+    WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) TLB_FLUSH_ALL);
     return;
 }
 
@@ -350,7 +371,7 @@ void idle_process() {
 
 
 int
-LoadProgram(char *name, char **args, ExceptionInfo *info)
+LoadProgram(char *name, char **args, ExceptionInfo *info, struct pcb *loadPcb)
 {
     int fd;
     int status;
@@ -468,7 +489,7 @@ LoadProgram(char *name, char **args, ExceptionInfo *info)
          */
     for (j = MEM_INVALID_PAGES >> PAGESHIFT; j < KERNEL_STACK_BASE >> PAGESHIFT; j++) {
         // will all be invalid for init and idle
-        if (active_pcb->PT0[j].valid) {
+        if (loadPcb->PT0[j].valid) {
             toBeFreePages += 1;
         }
     }
@@ -510,7 +531,7 @@ LoadProgram(char *name, char **args, ExceptionInfo *info)
     
     for (j = MEM_INVALID_PAGES >> PAGESHIFT; j < KERNEL_STACK_BASE >> PAGESHIFT; j++) {
         // will all be invalid for init and idle
-        if (active_pcb->PT0[j].valid) {
+        if (loadPcb->PT0[j].valid) {
             free_physical_page(j);
             //active_pcb->PT0[j]->valid = 0;  // set invalid
         }
@@ -527,8 +548,9 @@ LoadProgram(char *name, char **args, ExceptionInfo *info)
 //    >>>> Leave the first MEM_INVALID_PAGES number of PTEs in the
 //    >>>> Region 0 page table unused (and thus invalid)
     for (j = 0; j < MEM_INVALID_PAGES; j++) {
-        active_pcb->PT0[j].valid = 0;  // set invalid
+        loadPcb->PT0[j].valid = 0;  // set invalid
     }
+    WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) TLB_FLUSH_0);
 
     /* First, the text pages */
 //    >>>> For the next text_npg number of PTEs in the Region 0
@@ -539,11 +561,12 @@ LoadProgram(char *name, char **args, ExceptionInfo *info)
 //    >>>>     pfn   = a new page of physical memory
     
     for (j = MEM_INVALID_PAGES; j < MEM_INVALID_PAGES + text_npg; j++) {
-        active_pcb->PT0[j].valid = 1;
-        active_pcb->PT0[j].kprot = PROT_READ | PROT_WRITE;
-        active_pcb->PT0[j].uprot = PROT_READ | PROT_EXEC;
-        active_pcb->PT0[j].pfn = get_free_page();
+        loadPcb->PT0[j].valid = 1;
+        loadPcb->PT0[j].kprot = PROT_READ | PROT_WRITE;
+        loadPcb->PT0[j].uprot = PROT_READ | PROT_EXEC;
+        loadPcb->PT0[j].pfn = get_free_page();
     }
+    WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) TLB_FLUSH_0);
 
     /* Then the data and bss pages */
 //    >>>> For the next data_bss_npg number of PTEs in the Region 0
@@ -554,11 +577,19 @@ LoadProgram(char *name, char **args, ExceptionInfo *info)
 //    >>>>     pfn   = a new page of physical memory
     
     for (j = MEM_INVALID_PAGES + text_npg; j < MEM_INVALID_PAGES + text_npg + data_bss_npg; j++) {
-        active_pcb->PT0[j].valid = 1;
-        active_pcb->PT0[j].kprot = PROT_READ | PROT_WRITE;
-        active_pcb->PT0[j].uprot = PROT_READ | PROT_WRITE;
-        active_pcb->PT0[j].pfn = get_free_page();
+        loadPcb->PT0[j].valid = 1;
+        loadPcb->PT0[j].kprot = PROT_READ | PROT_WRITE;
+        loadPcb->PT0[j].uprot = PROT_READ | PROT_WRITE;
+        loadPcb->PT0[j].pfn = get_free_page();
     }
+    WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) TLB_FLUSH_0);
+
+    loadPcb->brkAddr = (void *) (uintptr_t) (j << PAGESHIFT);
+    // TracePrintf(0, "User Break: %d\n", MEM_INVALID_PAGES);
+    // TracePrintf(0, "User Break: %d\n", MEM_INVALID_PAGES << PAGESHIFT);
+    // TracePrintf(0, "User Break: %d\n", text_npg);
+    // TracePrintf(0, "User Break: %d\n", data_bss_npg);
+    // TracePrintf(0, "User Break: %d\n", loadPcb->brk);
 
     /* And finally the user stack pages */
 //    >>>> For stack_npg number of PTEs in the Region 0 page table
@@ -572,12 +603,16 @@ LoadProgram(char *name, char **args, ExceptionInfo *info)
     
     j = (USER_STACK_LIMIT >> PAGESHIFT) - 1;
     for (k = 0; k < stack_npg; k++) {
-        active_pcb->PT0[j].valid = 1;
-        active_pcb->PT0[j].kprot = PROT_READ | PROT_WRITE;
-        active_pcb->PT0[j].uprot = PROT_READ | PROT_WRITE;
-        active_pcb->PT0[j].pfn = get_free_page();
+        loadPcb->PT0[j].valid = 1;
+        loadPcb->PT0[j].kprot = PROT_READ | PROT_WRITE;
+        loadPcb->PT0[j].uprot = PROT_READ | PROT_WRITE;
+        loadPcb->PT0[j].pfn = get_free_page();
         j -= 1;
     }
+    WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) TLB_FLUSH_0);
+
+    loadPcb->stackAddr = (void *) (uintptr_t) ((j+1) << PAGESHIFT);
+
     TracePrintf(0, "Page table setting all done \n");
     /*
      *  All pages for the new address space are now in place.  Flush
@@ -609,7 +644,7 @@ LoadProgram(char *name, char **args, ExceptionInfo *info)
 //    >>>> For text_npg number of PTEs corresponding to the user text
 //    >>>> pages, set each PTEs kprot to PROT_READ | PROT_EXEC.
     for (j = MEM_INVALID_PAGES; j < MEM_INVALID_PAGES + text_npg; j++) {
-        active_pcb->PT0[j].kprot = PROT_READ | PROT_EXEC;
+        loadPcb->PT0[j].kprot = PROT_READ | PROT_EXEC;
     }
     
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
@@ -654,7 +689,7 @@ LoadProgram(char *name, char **args, ExceptionInfo *info)
         info->regs[j] = 0;
     }
     info->psr = 0;
-    TracePrintf(0, "Returning from LoadProgram...");
+    TracePrintf(0, "Returning from LoadProgram...\n");
     return (0);
 }
 
