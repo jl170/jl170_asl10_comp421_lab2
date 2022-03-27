@@ -45,17 +45,58 @@ void TRAP_ILLEGAL_handler(ExceptionInfo *info);
 void TRAP_MEMORY_handler(ExceptionInfo *info);
 void TRAP_MATH_handler(ExceptionInfo *info);
 void TRAP_TTY_RECEIVE_handler(ExceptionInfo *info);
-void TRAP_TRANSMIt_handler(ExceptionInfo *info);
+void TRAP_TRANSMIT_handler(ExceptionInfo *info);
+
+int yalnix_fork();
+int yalnix_exec();
+void yalnix_exit();
+int yalnix_wait();
+int yalnix_getpid();
+int yalnix_brk();
+int yalnix_delay();
+int yalnix_tty_read();
+int yalnix_tty_write();
 
 void idle_process();
 int get_free_page();
 int LoadProgram(char *name, char **args, ExceptionInfo *info, struct pcb *loadPcb);
 
+/*
+ results from kernel call, all kernel call requests enter through here
+ code gives kernel call number indicating which service being requested
+ 
+ args beginning in regs[1]
+ return value from kernel call should be returned to user process in regs[0]
+ */
 void TRAP_KERNEL_handler(ExceptionInfo *info)
 {
-    TracePrintf(0, "In TRAP_KERNEL_handler\n");
-    Halt();
-    (void) info;
+    TracePrintf(0, "In TRAP_KERNEL_handler");
+    
+    int result;
+    int code = info->code;
+    
+    if (code == 1) {
+        result = yalnix_fork();
+    } else if (code == 2) {
+        result = yalnix_exec();
+    } else if (code == 3) {
+        yalnix_exit();  // TODO: exit has no return
+        return;
+    } else if (code == 4) {
+        result = yalnix_wait();
+    } else if (code == 5) {
+        result = yalnix_getpid();
+    } else if (code == 6) {
+        result = yalnix_brk();
+    } else if (code == 7) {
+        result = yalnix_delay();
+    } else if (code == 21) {
+        result = yalnix_tty_read();
+    } else if (code == 22) {
+        result = yalnix_tty_write();
+    }  // if code not defined then not good
+
+    info->regs[0] = result;
 }
 
 void TRAP_CLOCK_handler(ExceptionInfo *info)
@@ -115,6 +156,78 @@ void TRAP_TRANSMIT_handler(ExceptionInfo *info)
     Halt();
     (void) info;
 }
+
+// procedures for Yalnix kernel calls
+
+/*
+ create a new process
+ 
+ memory image of child should be a copy of the parent
+ return value of parent should be process ID of child, return value of
+ child should be 0
+ can return first as child or parent, otherwise return error
+ 
+ */
+int yalnix_fork() {
+    // create new process id
+    // allocate new PCB
+    // copy parent kernel stsack including exception info
+    // allocate new memory for child process
+    // copy parent address space into child
+    
+    // create a new region 0 page table
+    // That means Region 0 page tables must be dynamically allocated and initialized (but, be careful, you cannot use malloc for this).
+    
+    // ExceptionInfo is on the kernel stack, and each process has its own kernel stack, so each has its own ExceptionInfo.  You don't ever need to save and restore the ExecptionInfo
+    
+    // return” in both processes by scheduling both to run in our queue(s)
+    TracePrintf(0, "In yalnix_fork");
+    Halt();
+}
+
+int yalnix_exec() {
+    TracePrintf(0, "In yalnix_exec");
+    Halt();
+}
+
+void yalnix_exit() {
+//    Exit(int status)
+    
+    // resources used by calling process should be freed
+    TracePrintf(0, "In yalnix_exit");
+    Halt();
+}
+
+int yalnix_wait() {
+    TracePrintf(0, "In yalnix_wait");
+    Halt();
+}
+
+int yalnix_getpid() {
+    TracePrintf(0, "In yalnix_getpid");
+    Halt();
+}
+
+int yalnix_brk() {
+    TracePrintf(0, "In yalnix_brk");
+    Halt();
+}
+
+int yalnix_delay() {
+    TracePrintf(0, "In yalnix_delay");
+    Halt();
+}
+
+int yalnix_tty_read() {
+    TracePrintf(0, "In yalnix_tty_read");
+    Halt();
+}
+
+int yalnix_tty_write() {
+    TracePrintf(0, "In yalnix_tty_write");
+    Halt();
+}
+
 
 /*
  called when kernel needs more pages added to kernel heap
