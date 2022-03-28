@@ -285,38 +285,64 @@ SetKernelBrk(void *addr)
 // }
 
 SavedContext *
-MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
+MySwitchFuncIdleInit(SavedContext *ctxp, void *p1, void *p2) {
     struct pcb *pcb1 = (struct pcb *) p1;
+    (void)pcb1;
     struct pcb *pcb2 = (struct pcb *) p2;
     uintptr_t i;
     struct pte svdPTE;
-    svdPTE.pfn = pageTable1[PAGE_TABLE_LEN - 1].pfn; // REMINDER: this might be fatal if our Kernel heap gets too large
-    svdPTE.kprot = pageTable1[PAGE_TABLE_LEN - 1].kprot;
-    svdPTE.valid = pageTable1[PAGE_TABLE_LEN - 1].valid;
-    pageTable1[PAGE_TABLE_LEN - 1].valid = 1;
-    pageTable1[PAGE_TABLE_LEN - 1].kprot = PROT_READ | PROT_WRITE;
+
+    int borrowpfn = PAGE_TABLE_LEN - 1;
+    uintptr_t borrowedAddrVA = (uintptr_t) (VMEM_1_LIMIT - PAGESIZE);
+    svdPTE.pfn = pageTable1[borrowpfn].pfn; // REMINDER: this might be fatal if our Kernel heap gets too large
+    svdPTE.kprot = pageTable1[borrowpfn].kprot;
+    svdPTE.valid = pageTable1[borrowpfn].valid;
+    pageTable1[borrowpfn].valid = 1;
+    pageTable1[borrowpfn].kprot = PROT_READ | PROT_WRITE;
+    
     
     for (i = KERNEL_STACK_BASE; i < KERNEL_STACK_LIMIT; i += PAGESIZE) {
-        pageTable1[PAGE_TABLE_LEN - 1].pfn = pcb2->PT0[i >> PAGESHIFT].pfn;
-        memcpy((void *)((PAGE_TABLE_LEN - 1) << PAGESHIFT), (void *) i, PAGESIZE);
-        WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) (PAGE_TABLE_LEN - 1) << PAGESHIFT);
+        struct pte entry2;
+        entry2.valid = 1;
+        entry2.kprot = (PROT_READ|PROT_WRITE);
+        entry2.uprot = PROT_NONE;
+        entry2.pfn = get_free_page();
+        pcb2->PT0[i >> PAGESHIFT] = entry2; // fix this
+        
+        pageTable1[borrowpfn].pfn = pcb2->PT0[i >> PAGESHIFT].pfn;
+        memcpy((void *)(borrowedAddrVA), (void *) i, PAGESIZE);
+        WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) borrowedAddrVA);
     }
     
     pageTable1[PAGE_TABLE_LEN - 1].kprot = svdPTE.kprot;
     pageTable1[PAGE_TABLE_LEN - 1].valid = svdPTE.valid;
     pageTable1[PAGE_TABLE_LEN - 1].pfn = svdPTE.pfn;
     
-    pcb1->ctx = ctxp;
-    memcpy((void*) pcb2->ctx, (void*) pcb1->ctx, sizeof(SavedContext));
-    TracePrintf(0, "In MySwitchFunc: %d %d\n", pcb1->ptNode->addr[pcb1->ptNodeIdx], pcb2->ptNode->addr[pcb2->ptNodeIdx]);
-    WriteRegister(REG_PTR0, (RCS421RegVal) pcb1->ptNode->addr[pcb1->ptNodeIdx]);
+    //pcb1->ctx = ctxp;
+    //memcpy((void*) pcb2->ctx, (void*) pcb1->ctx, sizeof(SavedContext));
+    //TracePrintf(0, "In MySwitchFunc: %d %d\n", pcb1->ptNode->addr[pcb1->ptNodeIdx], pcb2->ptNode->addr[pcb2->ptNodeIdx]);
+    WriteRegister(REG_PTR0, (RCS421RegVal) pcb2->ptNode->addr[pcb2->ptNodeIdx]);
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
     //memcpy((void*) pcb2->ctx, (void*) pcb1->ctx, sizeof(SavedContext));
     //pcb2->ctx = ctxp;
     TracePrintf(0, "Returning from myswitchfunc..");
-    return pcb2->ctx;
+    return ctxp;
     
     //return pcb2->ctx;
+}
+// struct pcb {
+//     int pid;
+//     SavedContext *ctx;
+//     struct pte *PT0; // virtual address of its page table
+//     struct pcb *next;
+//     void *brkAddr;
+//     void *stackAddr;
+//     struct ptNode *ptNode;
+//     int ptNodeIdx;
+// };
+void
+printPCBInfo(struct pcb *pcb1) {
+    TracePrintf(0, "printPCBInfo | pid: %d, SavedContext Addr: %d, PT0 VA: %d, PT0 PA: %d, \nbrkAddr: %d, stackAddr: %d, ptNode addr: %d, ptNodeIdx: %d\n", pcb1->pid, (uintptr_t)(pcb1->ctx), (uintptr_t)(pcb1->PT0), pcb1->ptNode->addr[pcb1->ptNodeIdx],(uintptr_t)pcb1->brkAddr, (uintptr_t)pcb1->stackAddr, (uintptr_t)pcb1->ptNode, pcb1->ptNodeIdx);
 }
 
 /**
@@ -386,7 +412,7 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
         // or a separate structure
         // this list of free page frames should be based on the pmem_size argument passed on to your KernelStart
     nextFreePage = (uintptr_t) MEM_INVALID_SIZE;
-    for (nextPage = nextFreePage; nextPage < KERNEL_STACK_BASE - PAGESIZE - KERNEL_STACK_PAGES*PAGESIZE; nextPage = nextPage + PAGESIZE) { // save 4 more pages for init
+    for (nextPage = nextFreePage; nextPage < KERNEL_STACK_BASE - PAGESIZE; nextPage = nextPage + PAGESIZE) {
         *((uintptr_t *) nextPage) = nextPage + PAGESIZE;
         freePages += 1;
     }
@@ -423,12 +449,12 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
         entry.pfn = i;
         idlePageTable0[i] = entry;
 
-        struct pte entry2;
-        entry2.valid = 1;
-        entry2.kprot = (PROT_READ|PROT_WRITE);
-        entry2.uprot = PROT_NONE;
-        entry2.pfn = i - KERNEL_STACK_PAGES;
-        idlePageTable0[i - KERNEL_STACK_PAGES] = entry2;
+        // struct pte entry2;
+        // entry2.valid = 1;
+        // entry2.kprot = (PROT_READ|PROT_WRITE);
+        // entry2.uprot = PROT_NONE;
+        // entry2.pfn = i - KERNEL_STACK_PAGES;
+        // pageTable0[i - KERNEL_STACK_PAGES] = entry2;
     }
 
     // Region 1 Kernel Text
@@ -475,6 +501,8 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     // }
     WriteRegister(REG_VM_ENABLE, 1); //cast to RCS421RegVal?
     vm_enabled = true;
+    printPCBInfo(active_pcb);
+    printPCBInfo(idle_pcb);
 
     // create an "idle" process to be run by the kernel when there are no other runnable (ready) processes in the system.
     // The process should be a loop that executes the Pause machine instruction on each iteration
@@ -500,17 +528,20 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     TracePrintf(0, "Starting contextswitch...\n");
     //ContextSwitch(DumbMySwitchFunc, init_pcb->ctx, init_pcb, init_pcb);
     //TracePrintf(0, "Finished first contextSwitch\n");
-    ContextSwitch(MySwitchFunc, active_pcb->ctx, active_pcb, init_pcb);
-    Halt();
-    //active_pcb = init_pcb;
+    ContextSwitch(MySwitchFuncIdleInit, active_pcb->ctx, active_pcb, init_pcb);
+    //Halt();
+    TracePrintf(0, "regptr0: %d, regidle: %d, reginit: %d\n", (uintptr_t) ReadRegister(REG_PTR0), idle_pcb->ptNode->addr[idle_pcb->ptNodeIdx], init_pcb->ptNode->addr[init_pcb->ptNodeIdx]);
+    active_pcb = init_pcb;
 
     //ExceptionInfo *info2 = malloc(sizeof(ExceptionInfo));
     //LoadProgram(cmd_args[0], cmd_args, info2, active_pcb);
-    //LoadProgram(cmd_args[0], cmd_args, info, active_pcb);
+    //TracePrintf(0, "idle: %d, init: %d, active; %d\n", (uintptr_t) idle_pcb, (uintptr_t) init_pcb, (uintptr_t) active_pcb);
+    LoadProgram(cmd_args[0], cmd_args, info, active_pcb);
     
     WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) TLB_FLUSH_ALL);
     //(void) init_pcb;
-    (void) cmd_args;
+    //(void) cmd_args;
+    //(void) idle_args;
     return;
 }
 
