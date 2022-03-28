@@ -11,6 +11,22 @@
 #include <sys/mman.h>
 #include <stdbool.h>
 
+struct ptNode {
+    struct ptNode *next;
+    uintptr_t addr[2];
+    bool valid[2];
+};
+
+struct pcb {
+    int pid;
+    SavedContext *ctx;
+    struct pte *PT0; // virtual address of its page table
+    struct pcb *next;
+    void *brkAddr;
+    void *stackAddr;
+    struct ptNode *ptNode;
+    int ptNodeIdx;
+};
 
 bool vm_enabled = false;  // indicates if virtual memory has been enabled, used in SetKernelBrk
 void *kernel_brk;  // first address not part of kernel heap
@@ -26,16 +42,11 @@ struct pcb *ready_pcb_tail;
 struct pcb *blocked_pcb;  // one for each reason?
 struct pcb *idle_pcb;
 
-int countargs;
+struct ptNode *startptNode;
+int numProcesses = 0;
+int numSlots = 0;
 
-struct pcb {
-    int pid;
-    SavedContext *ctx;
-    struct pte *PT0; // virtual address of its page table
-    struct pcb *next;
-    void *brkAddr;
-    void *stackAddr;
-};
+int countargs;
 
 void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, char **cmd_args);
 
@@ -264,6 +275,50 @@ SetKernelBrk(void *addr)
     return 0;
 }
 
+// SavedContext *
+// DumbMySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
+//     TracePrintf(0, "in DumbMySwitchFunc\n");
+//     struct pcb *pcb1 = (struct pcb *) p1;
+//     pcb1->ctx = ctxp;
+//     (void) p2;
+//     return ctxp;
+// }
+
+SavedContext *
+MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
+    struct pcb *pcb1 = (struct pcb *) p1;
+    struct pcb *pcb2 = (struct pcb *) p2;
+    uintptr_t i;
+    struct pte svdPTE;
+    svdPTE.pfn = pageTable1[PAGE_TABLE_LEN - 1].pfn; // REMINDER: this might be fatal if our Kernel heap gets too large
+    svdPTE.kprot = pageTable1[PAGE_TABLE_LEN - 1].kprot;
+    svdPTE.valid = pageTable1[PAGE_TABLE_LEN - 1].valid;
+    pageTable1[PAGE_TABLE_LEN - 1].valid = 1;
+    pageTable1[PAGE_TABLE_LEN - 1].kprot = PROT_READ | PROT_WRITE;
+    
+    for (i = KERNEL_STACK_BASE; i < KERNEL_STACK_LIMIT; i += PAGESIZE) {
+        pageTable1[PAGE_TABLE_LEN - 1].pfn = pcb2->PT0[i >> PAGESHIFT].pfn;
+        memcpy((void *)((PAGE_TABLE_LEN - 1) << PAGESHIFT), (void *) i, PAGESIZE);
+        WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) (PAGE_TABLE_LEN - 1) << PAGESHIFT);
+    }
+    
+    pageTable1[PAGE_TABLE_LEN - 1].kprot = svdPTE.kprot;
+    pageTable1[PAGE_TABLE_LEN - 1].valid = svdPTE.valid;
+    pageTable1[PAGE_TABLE_LEN - 1].pfn = svdPTE.pfn;
+    
+    pcb1->ctx = ctxp;
+    memcpy((void*) pcb2->ctx, (void*) pcb1->ctx, sizeof(SavedContext));
+    TracePrintf(0, "In MySwitchFunc: %d %d\n", pcb1->ptNode->addr[pcb1->ptNodeIdx], pcb2->ptNode->addr[pcb2->ptNodeIdx]);
+    WriteRegister(REG_PTR0, (RCS421RegVal) pcb1->ptNode->addr[pcb1->ptNodeIdx]);
+    WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
+    //memcpy((void*) pcb2->ctx, (void*) pcb1->ctx, sizeof(SavedContext));
+    //pcb2->ctx = ctxp;
+    TracePrintf(0, "Returning from myswitchfunc..");
+    return pcb2->ctx;
+    
+    //return pcb2->ctx;
+}
+
 /**
  * -- From section 3.3
  * info: pointer to an initial exceptioninfo structure. KernelStart is called in the same way as the interrupt handlers
@@ -298,50 +353,85 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     TracePrintf(0, "Interrupt vector: %d\n", (int)(uintptr_t) handlers[3]);
     TracePrintf(0, "Interrupt vector: %d\n", (int)(uintptr_t) handlers[4]);
     TracePrintf(0, "Interrupt vector: %d\n", (int)(uintptr_t) TRAP_VECTOR_SIZE);
-    struct pte *pageTable0 = malloc(sizeof(struct pte) * PAGE_TABLE_LEN);  // need to malloc before building page table structures
-    //kernel_brk += 4096;
+        
+    idle_pcb = malloc(sizeof(struct pcb));
+    active_pcb = malloc(sizeof(struct pcb));
+    startptNode = malloc(sizeof(struct ptNode));
+    idle_pcb->ctx = malloc(sizeof(SavedContext));
+    active_pcb->ctx = malloc(sizeof(SavedContext));
+    startptNode->addr[0] = (uintptr_t) kernel_brk;
+    startptNode->addr[1] = (uintptr_t) kernel_brk + PAGESIZE/2;
+    startptNode->valid[0] = 1;
+    startptNode->valid[1] = 1;
+    numProcesses = 2;
+    numSlots = 2;
+    kernel_brk += PAGESIZE;
+    //struct pte *pageTable0 = malloc(sizeof(struct pte) * PAGE_TABLE_LEN);  // need to malloc before building page table structures
+
+    idle_pcb->next = NULL;
+    active_pcb->next = NULL;
+    idle_pcb->PT0 = (struct pte *) startptNode->addr[0];
+    active_pcb->PT0 = (struct pte *) startptNode->addr[1];
+    struct pte *idlePageTable0 = idle_pcb->PT0;
+    struct pte *pageTable0 = active_pcb->PT0;
+    idle_pcb->pid = 0;
+    active_pcb->pid = 1;
+    idle_pcb->ptNode = startptNode;
+    active_pcb->ptNode = startptNode;
+    idle_pcb->ptNodeIdx = 0;
+    active_pcb->ptNodeIdx = 1;
+
     // Build a structure to keep track of what page frames in physical memory are free
         // use linked list of physical frames, implemented in frames themselves
         // or a separate structure
         // this list of free page frames should be based on the pmem_size argument passed on to your KernelStart
-    
     nextFreePage = (uintptr_t) MEM_INVALID_SIZE;
-    for (nextPage = nextFreePage; nextPage < KERNEL_STACK_BASE - PAGESIZE; nextPage = nextPage + PAGESIZE) {
+    for (nextPage = nextFreePage; nextPage < KERNEL_STACK_BASE - PAGESIZE - KERNEL_STACK_PAGES*PAGESIZE; nextPage = nextPage + PAGESIZE) { // save 4 more pages for init
         *((uintptr_t *) nextPage) = nextPage + PAGESIZE;
         freePages += 1;
     }
-//    origBreak = (uintptr_t) orig_brk;
-//    *((uintptr_t *) nextPage) = origBreak;
     kernelBreak = (uintptr_t) kernel_brk;
     *((uintptr_t *) nextPage) = kernelBreak;
     for (; kernelBreak < pmem_size - 2*PAGESIZE; kernelBreak = kernelBreak + PAGESIZE) {
         *((uintptr_t *) kernelBreak) = kernelBreak + PAGESIZE;
         freePages += 1;
     }
-
+    
     // be careful not to accidentally end up using the same page of physical memory twice for different uses at the same time
     // when you free a page, add it back to the linked list. When you allocate it, remove it from the linked list.
 
     // Build the initial page tabels for Region 0 and Region 1
-
-    
-//    origBreak = (uintptr_t) orig_brk;
     kernelBreak = (uintptr_t) kernel_brk;
 
+    // Region 0 before kernel stack
     for (i = 0; i < KERNEL_STACK_BASE >> PAGESHIFT; i++) {
         struct pte entry;
         entry.valid = 0;
         pageTable0[i] = entry;
+        
+        struct pte entry2;
+        entry2.valid = 0;
+        idlePageTable0[i] = entry2;
     }
+    
+    // Region 0 Kernel stack
     for (i = KERNEL_STACK_BASE >> PAGESHIFT; i < KERNEL_STACK_LIMIT >> PAGESHIFT; i++ ) {
         struct pte entry;
         entry.valid = 1;
         entry.kprot = (PROT_READ|PROT_WRITE);
         entry.uprot = PROT_NONE;
         entry.pfn = i;
-        pageTable0[i] = entry;
+        idlePageTable0[i] = entry;
+
+        struct pte entry2;
+        entry2.valid = 1;
+        entry2.kprot = (PROT_READ|PROT_WRITE);
+        entry2.uprot = PROT_NONE;
+        entry2.pfn = i - KERNEL_STACK_PAGES;
+        idlePageTable0[i - KERNEL_STACK_PAGES] = entry2;
     }
 
+    // Region 1 Kernel Text
     for (i = VMEM_0_LIMIT >> PAGESHIFT; i < ((uintptr_t) &_etext) >> PAGESHIFT; i++) {
         //racePrintf(0, "allocating text: %d\n", i);
         struct pte entry;
@@ -351,8 +441,8 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
         entry.pfn = i;
         pageTable1[i - PAGE_TABLE_LEN] = entry;
     }
-    // TODO: to orig_brk no longer accurate due to malloc
-//    for (i = ((uintptr_t) &_etext) >> PAGESHIFT; i < (uintptr_t) orig_brk >> PAGESHIFT; i++) {
+
+    // Region 1 Kernel data bss
     for (i = ((uintptr_t) &_etext) >> PAGESHIFT; i < (uintptr_t) kernel_brk >> PAGESHIFT; i++) {
         //racePrintf(0, "allocating databss: %d\n", i);
         struct pte entry;
@@ -362,7 +452,8 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
         entry.pfn = i;
         pageTable1[i - PAGE_TABLE_LEN] = entry;
     }
-//    for (origBreak = ((uintptr_t) orig_brk) >> PAGESHIFT; origBreak < VMEM_LIMIT >> PAGESHIFT; origBreak++) {
+
+    // Region 1 above data bss
     for (kernelBreak = ((uintptr_t) kernel_brk) >> PAGESHIFT; kernelBreak < VMEM_LIMIT >> PAGESHIFT; kernelBreak++) {
         //racePrintf(0, "setting rest to zero: %d\n", i);
         struct pte entry;
@@ -372,7 +463,7 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     
 
     // Initialize registers REG_PTR0 and REG_PTR1 to define these initial page tables
-    WriteRegister(REG_PTR0, (RCS421RegVal) &pageTable0[0]);
+    WriteRegister(REG_PTR0, (RCS421RegVal) &idlePageTable0[0]);
     WriteRegister(REG_PTR1, (RCS421RegVal) &pageTable1[0]);
 
     // Enable virtual memory
@@ -390,11 +481,7 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     // Can be loaded from a file using LoadProgram, or have it "built into" the rest of the code
         // initialize the pc value for this idle process to the address of the code for idle
 
-    
-    // idle_pcb = malloc(sizeof(struct pcb));
-    // idle_pcb->next = NULL;
-    // idle_pcb->PT0 = malloc(sizeof(struct pte) * PAGE_TABLE_LEN);
-    // idle_pcb->pid = 0;
+
     
     // loadprogram for idle
 
@@ -403,16 +490,27 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     // When process exits, its children continue to run without parents
     // To run initial program you should put file name if the init program on the command line when your run your kernel. It will then be passed to
     // KernelStart as one of the cmd_args strings
-    
-    
-    active_pcb = malloc(sizeof(struct pcb));
-    active_pcb->next = NULL;
-    active_pcb->PT0 = pageTable0;
-    active_pcb->pid = 1;
-
+    struct pcb *init_pcb = active_pcb;
+    active_pcb = idle_pcb;
+    char *idle_args[2] = {"idle", NULL};
     TracePrintf(0, "Starting loadProgram\n");
-    LoadProgram(cmd_args[0], cmd_args, info, active_pcb);
+    LoadProgram(idle_args[0], &idle_args[0], info, active_pcb);
+    
+
+    TracePrintf(0, "Starting contextswitch...\n");
+    //ContextSwitch(DumbMySwitchFunc, init_pcb->ctx, init_pcb, init_pcb);
+    //TracePrintf(0, "Finished first contextSwitch\n");
+    ContextSwitch(MySwitchFunc, active_pcb->ctx, active_pcb, init_pcb);
+    Halt();
+    //active_pcb = init_pcb;
+
+    //ExceptionInfo *info2 = malloc(sizeof(ExceptionInfo));
+    //LoadProgram(cmd_args[0], cmd_args, info2, active_pcb);
+    //LoadProgram(cmd_args[0], cmd_args, info, active_pcb);
+    
     WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) TLB_FLUSH_ALL);
+    //(void) init_pcb;
+    (void) cmd_args;
     return;
 }
 
@@ -464,6 +562,14 @@ void free_physical_page(int index) {
     uintptr_t *actualAddr = (uintptr_t *) addrNum;
     *actualAddr = nextFreePage;
     
+    // struct pte svdPTE;
+    // svdPTE.pfn = pageTable1[PAGE_TABLE_LEN - 1].pfn; // REMINDER: this might be fatal if our Kernel heap gets too large
+    // svdPTE.kprot = pageTable1[PAGE_TABLE_LEN - 1].kprot;
+    // svdPTE.valid = pageTable1[PAGE_TABLE_LEN - 1].valid;
+    // pageTable1[PAGE_TABLE_LEN - 1].valid = 1;
+    // pageTable1[PAGE_TABLE_LEN - 1].pfn = index;
+    // pageTable1[PAGE_TABLE_LEN - 1].kprot = PROT_READ | PROT_WRITE;
+
     // set nextFreePage to the physical address of the pfn of the page to be freed
     nextFreePage = (uintptr_t) ((active_pcb->PT0[index].pfn) << PAGESHIFT);
     
@@ -475,13 +581,6 @@ void free_physical_page(int index) {
     
     // set valid bit to 0
     active_pcb->PT0[index].valid = 0;
-}
-
-
-void idle_process() {
-    while (true) {
-        Pause();
-    }
 }
 
 
@@ -732,9 +831,9 @@ LoadProgram(char *name, char **args, ExceptionInfo *info, struct pcb *loadPcb)
 
     TracePrintf(0, "Page table setting all done \n");
     
-    for (k = VMEM_0_BASE >> PAGESHIFT; k < VMEM_0_LIMIT >> PAGESHIFT; k++) {
-        TracePrintf(0, "page: %d, pfn: %d\n", k, (uintptr_t) loadPcb->PT0[k].pfn);
-    }
+    // for (k = VMEM_0_BASE >> PAGESHIFT; k < VMEM_0_LIMIT >> PAGESHIFT; k++) {
+    //     TracePrintf(0, "page: %d, pfn: %d\n", k, (uintptr_t) loadPcb->PT0[k].pfn);
+    // }
     
     
     /*
