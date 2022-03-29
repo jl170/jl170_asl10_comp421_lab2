@@ -69,7 +69,7 @@ int yalnix_exec();
 void yalnix_exit();
 int yalnix_wait();
 int yalnix_getpid();
-int yalnix_brk();
+int yalnix_brk(uintptr_t addr);
 int yalnix_delay(int clock_ticks);
 int yalnix_tty_read();
 int yalnix_tty_write();
@@ -89,7 +89,7 @@ SavedContext *MySwitchFuncIdleInit(SavedContext *ctxp, void *p1, void *p2);
  */
 void TRAP_KERNEL_handler(ExceptionInfo *info)
 {
-    TracePrintf(0, "In TRAP_KERNEL_handler\n");
+    TracePrintf(0, "\n\nIn TRAP_KERNEL_handler\n");
     
     int result;
     int code = info->code;
@@ -106,7 +106,7 @@ void TRAP_KERNEL_handler(ExceptionInfo *info)
     } else if (code == YALNIX_GETPID) {
         result = yalnix_getpid();
     } else if (code == YALNIX_BRK) {
-        result = yalnix_brk();
+        result = yalnix_brk((uintptr_t) info->regs[1]);
     } else if (code == YALNIX_DELAY) {
         result = yalnix_delay((int) info->regs[1]);
     } else if (code == YALNIX_TTY_READ) {
@@ -120,14 +120,14 @@ void TRAP_KERNEL_handler(ExceptionInfo *info)
 
 void TRAP_CLOCK_handler(ExceptionInfo *info)
 {
-    TracePrintf(0, "In TRAP_CLOCK_handler\n");
+    TracePrintf(0, "\n\nIn TRAP_CLOCK_handler\n");
     // Decrement all delay counts in the delay linked list
         // if they reach zero, then take them out of the delay list and put them in the ready queue
     struct pcb *currDelayProcess = next_delay_pcb;
     struct pcb *prev, *nextDelayProcess;
     while (currDelayProcess) {
-        currDelayProcess->delay -= 1; // decrement delay of this delayed process
-        if (--currDelayProcess->delay == 0) { // if delay reaches zero, (alter the linked list of delayed processes)
+        TracePrintf(0, "Process %d delay %d left\n", currDelayProcess->pid, currDelayProcess->delay - 1);
+        if (--currDelayProcess->delay == 0) { // decrement delay, and if delay reaches zero, (alter the linked list of delayed processes)
             if (currDelayProcess == next_delay_pcb) { // if this is the first delay process in the list,
                 next_delay_pcb = next_delay_pcb->next; // changed the head of the list
             } else {
@@ -142,6 +142,7 @@ void TRAP_CLOCK_handler(ExceptionInfo *info)
                 ready_pcb_tail->next = currDelayProcess;
                 ready_pcb_tail = currDelayProcess;
             }
+            TracePrintf(0, "In clock handler, after adding 0 delay to ready list: head: %d, tail: %d\n", (uintptr_t)ready_pcb_head, (uintptr_t)ready_pcb_tail);
             prev = currDelayProcess;
             currDelayProcess = nextDelayProcess; // after we're all done, move pointer to currDelayProcess for next step
         } else { // if delay is not zero, then just move on
@@ -150,22 +151,37 @@ void TRAP_CLOCK_handler(ExceptionInfo *info)
         }
 
     }
+    TracePrintf(0, "From Clock handler: processTickCount: %d\n", processTickCount);
     // increment processTickCount if processTickCount < 2
-    if (processTickCount < 2) {
-        processTickCount++;
-    } else if (processTickCount >= 2) { // if tick count is >= 2,
-        if (!ready_pcb_head) { // if there is a process to switch to,
-            ready_pcb_tail->next = active_pcb; // set the next of the original tail
-            ready_pcb_tail = active_pcb; // set the tail pointer
+    if (processTickCount >= 2 || active_pcb->pid == 0) { // if tick count is >= 2,
+        TracePrintf(0, "ready_pcb_head: %d, tail: %d\n", (uintptr_t) ready_pcb_head, (uintptr_t) ready_pcb_tail);
+        if (ready_pcb_head) { // if there is a process to switch to,
+            if (active_pcb->pid == 0) {
+                TracePrintf(0, "idle was running, so contextSwitch from process %d to process: %d\n", active_pcb->pid, ready_pcb_tail->pid);
+            } else {
+                TracePrintf(0, "processTickCount is >= 2, contextSwitch from process %d to process: %d\n", active_pcb->pid, ready_pcb_tail->pid);
+            }
+            struct pcb *switchFrom;
+            if (active_pcb->pid != 0) {
+                ready_pcb_tail->next = active_pcb; // set the next of the original tail
+                ready_pcb_tail = active_pcb; // set the tail pointer
+                switchFrom = ready_pcb_tail;
+            } else {
+                switchFrom = idle_pcb;
+            }
             active_pcb = ready_pcb_head; // set new active pcb
+            if (ready_pcb_head->next == NULL) {
+                ready_pcb_tail = NULL;
+            }
             ready_pcb_head = ready_pcb_head->next; // set the new head
             active_pcb->next = NULL; // set the next of the active pcb
 
             // context switch from the original process (which is now in ready_pcb_tail) to the ready process next in line (which is now active_pcb)
-            ContextSwitch(MySwitchFuncNormal, ready_pcb_tail->ctx, ready_pcb_tail, active_pcb); 
+            ContextSwitch(MySwitchFuncNormal, switchFrom->ctx, switchFrom, active_pcb); 
         }
+    } else if (processTickCount < 2) {
+        processTickCount++;
     }
-    // if processTickCount >= 2, and if there are any other ready processes, context switch to the ready process next in line
     (void) info;
 }
 
@@ -272,8 +288,11 @@ int yalnix_getpid() {
     Halt();
 }
 
-int yalnix_brk() {
+int yalnix_brk(uintptr_t addr) {
     TracePrintf(0, "In yalnix_brk\n");
+    // round up addr to see which page we need to allocate to or free
+    // If an 
+    (void)addr;
     Halt();
 }
 
