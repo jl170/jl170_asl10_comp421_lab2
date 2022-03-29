@@ -26,9 +26,11 @@ struct pcb {
     void *stackAddr;
     struct ptNode *ptNode;
     int ptNodeIdx;
+    int delay;
 };
 
 bool vm_enabled = false;  // indicates if virtual memory has been enabled, used in SetKernelBrk
+bool initLoaded = false;
 void *kernel_brk;  // first address not part of kernel heap
 int setKernelBrkCount = 0;
 
@@ -37,14 +39,18 @@ uintptr_t nextFreePage;
 struct pte pageTable1[PAGE_TABLE_LEN];
 
 struct pcb *active_pcb;
-struct pcb *ready_pcb_head;  // queue
-struct pcb *ready_pcb_tail;
+struct pcb *init_pcb;
+struct pcb *ready_pcb_head = NULL;  // queue
+struct pcb *ready_pcb_tail = NULL;
 struct pcb *blocked_pcb;  // one for each reason?
+struct pcb *next_delay_pcb = NULL;
 struct pcb *idle_pcb;
 
 struct ptNode *startptNode;
 int numProcesses = 0;
 int numSlots = 0;
+int numReadyProcesses = 0;
+int processTickCount = 0;
 
 int countargs;
 
@@ -64,13 +70,15 @@ void yalnix_exit();
 int yalnix_wait();
 int yalnix_getpid();
 int yalnix_brk();
-int yalnix_delay();
+int yalnix_delay(int clock_ticks);
 int yalnix_tty_read();
 int yalnix_tty_write();
 
 void idle_process();
 int get_free_page();
 int LoadProgram(char *name, char **args, ExceptionInfo *info, struct pcb *loadPcb);
+SavedContext *MySwitchFuncNormal(SavedContext *ctxp, void *p1, void *p2); 
+SavedContext *MySwitchFuncIdleInit(SavedContext *ctxp, void *p1, void *p2);
 
 /*
  results from kernel call, all kernel call requests enter through here
@@ -81,29 +89,29 @@ int LoadProgram(char *name, char **args, ExceptionInfo *info, struct pcb *loadPc
  */
 void TRAP_KERNEL_handler(ExceptionInfo *info)
 {
-    TracePrintf(0, "In TRAP_KERNEL_handler");
+    TracePrintf(0, "In TRAP_KERNEL_handler\n");
     
     int result;
     int code = info->code;
     
-    if (code == 1) {
+    if (code == YALNIX_FORK) {
         result = yalnix_fork();
-    } else if (code == 2) {
+    } else if (code == YALNIX_EXEC) {
         result = yalnix_exec();
-    } else if (code == 3) {
+    } else if (code == YALNIX_EXIT) {
         yalnix_exit();  // TODO: exit has no return
         return;
-    } else if (code == 4) {
+    } else if (code == YALNIX_WAIT) {
         result = yalnix_wait();
-    } else if (code == 5) {
+    } else if (code == YALNIX_GETPID) {
         result = yalnix_getpid();
-    } else if (code == 6) {
+    } else if (code == YALNIX_BRK) {
         result = yalnix_brk();
-    } else if (code == 7) {
-        result = yalnix_delay();
-    } else if (code == 21) {
+    } else if (code == YALNIX_DELAY) {
+        result = yalnix_delay((int) info->regs[1]);
+    } else if (code == YALNIX_TTY_READ) {
         result = yalnix_tty_read();
-    } else if (code == 22) {
+    } else if (code == YALNIX_TTY_WRITE) {
         result = yalnix_tty_write();
     }  // if code not defined then not good
 
@@ -113,7 +121,51 @@ void TRAP_KERNEL_handler(ExceptionInfo *info)
 void TRAP_CLOCK_handler(ExceptionInfo *info)
 {
     TracePrintf(0, "In TRAP_CLOCK_handler\n");
-    Halt();
+    // Decrement all delay counts in the delay linked list
+        // if they reach zero, then take them out of the delay list and put them in the ready queue
+    struct pcb *currDelayProcess = next_delay_pcb;
+    struct pcb *prev, *nextDelayProcess;
+    while (currDelayProcess) {
+        currDelayProcess->delay -= 1; // decrement delay of this delayed process
+        if (--currDelayProcess->delay == 0) { // if delay reaches zero, (alter the linked list of delayed processes)
+            if (currDelayProcess == next_delay_pcb) { // if this is the first delay process in the list,
+                next_delay_pcb = next_delay_pcb->next; // changed the head of the list
+            } else {
+                prev->next = currDelayProcess->next; // else, set the previous process's next field
+            }
+            nextDelayProcess = currDelayProcess->next; // save the next of currDelayProcess here, b/c we need to set next field to zero and we aren't done with using currDelayProcess
+            currDelayProcess->next = NULL;
+            if (!ready_pcb_tail) { // If ready_pcb_tail is NULL (there we no ready processes), set tail and head
+                ready_pcb_tail = currDelayProcess;
+                ready_pcb_head = currDelayProcess;
+            } else { // else (there are ready processes), set next field of tail and set tail
+                ready_pcb_tail->next = currDelayProcess;
+                ready_pcb_tail = currDelayProcess;
+            }
+            prev = currDelayProcess;
+            currDelayProcess = nextDelayProcess; // after we're all done, move pointer to currDelayProcess for next step
+        } else { // if delay is not zero, then just move on
+            prev = currDelayProcess;
+            currDelayProcess = currDelayProcess->next;
+        }
+
+    }
+    // increment processTickCount if processTickCount < 2
+    if (processTickCount < 2) {
+        processTickCount++;
+    } else if (processTickCount >= 2) { // if tick count is >= 2,
+        if (!ready_pcb_head) { // if there is a process to switch to,
+            ready_pcb_tail->next = active_pcb; // set the next of the original tail
+            ready_pcb_tail = active_pcb; // set the tail pointer
+            active_pcb = ready_pcb_head; // set new active pcb
+            ready_pcb_head = ready_pcb_head->next; // set the new head
+            active_pcb->next = NULL; // set the next of the active pcb
+
+            // context switch from the original process (which is now in ready_pcb_tail) to the ready process next in line (which is now active_pcb)
+            ContextSwitch(MySwitchFuncNormal, ready_pcb_tail->ctx, ready_pcb_tail, active_pcb); 
+        }
+    }
+    // if processTickCount >= 2, and if there are any other ready processes, context switch to the ready process next in line
     (void) info;
 }
 
@@ -192,12 +244,12 @@ int yalnix_fork() {
     // ExceptionInfo is on the kernel stack, and each process has its own kernel stack, so each has its own ExceptionInfo.  You don't ever need to save and restore the ExecptionInfo
     
     // return” in both processes by scheduling both to run in our queue(s)
-    TracePrintf(0, "In yalnix_fork");
+    TracePrintf(0, "In yalnix_fork\n");
     Halt();
 }
 
 int yalnix_exec() {
-    TracePrintf(0, "In yalnix_exec");
+    TracePrintf(0, "In yalnix_exec\n");
     Halt();
 }
 
@@ -205,37 +257,58 @@ void yalnix_exit() {
 //    Exit(int status)
     
     // resources used by calling process should be freed
-    TracePrintf(0, "In yalnix_exit");
+    TracePrintf(0, "In yalnix_exit\n");
     Halt();
 }
 
 int yalnix_wait() {
-    TracePrintf(0, "In yalnix_wait");
+    TracePrintf(0, "In yalnix_wait\n");
     Halt();
 }
 
 int yalnix_getpid() {
-    TracePrintf(0, "In yalnix_getpid");
+    TracePrintf(0, "In yalnix_getpid\n");
+    return active_pcb->pid;
     Halt();
 }
 
 int yalnix_brk() {
-    TracePrintf(0, "In yalnix_brk");
+    TracePrintf(0, "In yalnix_brk\n");
     Halt();
 }
 
-int yalnix_delay() {
-    TracePrintf(0, "In yalnix_delay");
-    Halt();
+int yalnix_delay(int clock_ticks) {
+    TracePrintf(0, "In yalnix_delay: %d ticks\n", clock_ticks);
+    if (clock_ticks > 0) {
+        active_pcb->delay = clock_ticks;
+        struct pcb *prev_pcb = active_pcb;
+        active_pcb->next = next_delay_pcb;
+        next_delay_pcb = active_pcb;
+        if (numReadyProcesses > 0) {
+            active_pcb = ready_pcb_head; // the ready process head becomes the active process
+            ready_pcb_head = ready_pcb_head->next; // the "next" of the ready process head becomes the ready process head
+            active_pcb->next = NULL; // the new active process has its next field reset
+            numReadyProcesses -= 1; // we essentially pulled a node out of the ready process
+            if (numReadyProcesses == 0) { // if ready Q is empty
+                ready_pcb_tail = NULL;
+            }
+        } else {
+            active_pcb = idle_pcb;
+        }
+        ContextSwitch(MySwitchFuncNormal, prev_pcb->ctx, prev_pcb, active_pcb);
+    } else if (clock_ticks < 0) {
+        return ERROR;
+    }
+    return 0;
 }
 
 int yalnix_tty_read() {
-    TracePrintf(0, "In yalnix_tty_read");
+    TracePrintf(0, "In yalnix_tty_read\n");
     Halt();
 }
 
 int yalnix_tty_write() {
-    TracePrintf(0, "In yalnix_tty_write");
+    TracePrintf(0, "In yalnix_tty_write\n");
     Halt();
 }
 
@@ -284,6 +357,7 @@ SetKernelBrk(void *addr)
 //     return ctxp;
 // }
 
+
 SavedContext *
 MySwitchFuncIdleInit(SavedContext *ctxp, void *p1, void *p2) {
     struct pcb *pcb1 = (struct pcb *) p1;
@@ -325,10 +399,41 @@ MySwitchFuncIdleInit(SavedContext *ctxp, void *p1, void *p2) {
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
     //memcpy((void*) pcb2->ctx, (void*) pcb1->ctx, sizeof(SavedContext));
     //pcb2->ctx = ctxp;
-    TracePrintf(0, "Returning from myswitchfunc..");
+    TracePrintf(0, "Returning from myswitchfuncIdleInit..\n");
+    active_pcb = pcb2;
+    processTickCount = 0;
     return ctxp;
     
     //return pcb2->ctx;
+}
+
+SavedContext *
+MySwitchFuncNormal(SavedContext *ctxp, void *p1, void *p2) {
+    struct pcb *pcb1 = (struct pcb *) p1;
+    (void)pcb1;
+    (void)ctxp;
+    struct pcb *pcb2 = (struct pcb *) p2;
+    // uintptr_t i;
+    // struct pte svdPTE;
+
+    // int borrowpfn = PAGE_TABLE_LEN - 1;
+    // uintptr_t borrowedAddrVA = (uintptr_t) (VMEM_1_LIMIT - PAGESIZE);
+    // svdPTE.pfn = pageTable1[borrowpfn].pfn; // REMINDER: this might be fatal if our Kernel heap gets too large
+    // svdPTE.kprot = pageTable1[borrowpfn].kprot;
+    // svdPTE.valid = pageTable1[borrowpfn].valid;
+    // pageTable1[borrowpfn].valid = 1;
+    // pageTable1[borrowpfn].kprot = PROT_READ | PROT_WRITE;
+    // pageTable1[borrowpfn].pfn = pcb2->PT0[i >> PAGESHIFT].pfn;
+    
+    // pageTable1[PAGE_TABLE_LEN - 1].kprot = svdPTE.kprot;
+    // pageTable1[PAGE_TABLE_LEN - 1].valid = svdPTE.valid;
+    // pageTable1[PAGE_TABLE_LEN - 1].pfn = svdPTE.pfn;
+
+    WriteRegister(REG_PTR0, (RCS421RegVal) pcb2->ptNode->addr[pcb2->ptNodeIdx]);
+    WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
+    TracePrintf(0, "Returning from MySwitchFuncNormal..\n");
+    processTickCount = 0;
+    return pcb2->ctx;
 }
 // struct pcb {
 //     int pid;
@@ -518,7 +623,7 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     // When process exits, its children continue to run without parents
     // To run initial program you should put file name if the init program on the command line when your run your kernel. It will then be passed to
     // KernelStart as one of the cmd_args strings
-    struct pcb *init_pcb = active_pcb;
+    init_pcb = active_pcb;
     active_pcb = idle_pcb;
     char *idle_args[2] = {"idle", NULL};
     TracePrintf(0, "Starting loadProgram\n");
@@ -531,7 +636,11 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     ContextSwitch(MySwitchFuncIdleInit, active_pcb->ctx, active_pcb, init_pcb);
     //Halt();
     TracePrintf(0, "regptr0: %d, regidle: %d, reginit: %d\n", (uintptr_t) ReadRegister(REG_PTR0), idle_pcb->ptNode->addr[idle_pcb->ptNodeIdx], init_pcb->ptNode->addr[init_pcb->ptNodeIdx]);
-    active_pcb = init_pcb;
+    if (initLoaded) {
+        return;
+    } else {
+        initLoaded = true;
+    }
 
     //ExceptionInfo *info2 = malloc(sizeof(ExceptionInfo));
     //LoadProgram(cmd_args[0], cmd_args, info2, active_pcb);
