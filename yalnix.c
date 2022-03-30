@@ -76,9 +76,12 @@ int yalnix_tty_write();
 
 void idle_process();
 int get_free_page();
+void free_physical_page(int index);
 int LoadProgram(char *name, char **args, ExceptionInfo *info, struct pcb *loadPcb);
 SavedContext *MySwitchFuncNormal(SavedContext *ctxp, void *p1, void *p2); 
 SavedContext *MySwitchFuncIdleInit(SavedContext *ctxp, void *p1, void *p2);
+
+void printPT(struct pte *PT, int printValid);
 
 /*
  results from kernel call, all kernel call requests enter through here
@@ -289,11 +292,40 @@ int yalnix_getpid() {
 }
 
 int yalnix_brk(uintptr_t addr) {
+    printPT(active_pcb->PT0, 1);
+    unsigned int i;
     TracePrintf(0, "In yalnix_brk\n");
+    
+    if (addr >= USER_STACK_LIMIT) {
+        return ERROR;
+    }
+    
     // round up addr to see which page we need to allocate to or free
-    // If an 
-    (void)addr;
-    Halt();
+    uintptr_t roundedAddr = UP_TO_PAGE(addr);
+    // If they're the same, don't do anything
+    if ((uintptr_t) active_pcb->brkAddr == roundedAddr) {
+        // don't do anything
+    } else if ((uintptr_t) active_pcb->brkAddr <= roundedAddr) { // If roundedAddr > breakAddr, 
+        // then allocate pages and update ptes in pt0, and breakAddr accordingly
+        for (i = (uintptr_t) active_pcb->brkAddr >> PAGESHIFT; i < roundedAddr >> PAGESHIFT; i++) {
+            active_pcb->PT0[i].valid = 1;
+            active_pcb->PT0[i].kprot = PROT_READ | PROT_WRITE;
+            active_pcb->PT0[i].uprot = PROT_READ | PROT_WRITE;
+            active_pcb->PT0[i].pfn = get_free_page();
+        }
+        active_pcb->brkAddr = (void *) roundedAddr;
+    } else if ((uintptr_t) active_pcb->brkAddr <= roundedAddr) { // If roundedAddr < breakAddr
+        // then free pages and update pt0, and breakAddr accordingly
+        for (i = roundedAddr >> PAGESHIFT; i < (uintptr_t) active_pcb->brkAddr >> PAGESHIFT; i++) {
+            active_pcb->PT0[i].valid = 0;
+            free_physical_page(i);
+        }
+        active_pcb->brkAddr = (void *) roundedAddr;
+    }
+
+    // PLEASE FLUSH PLEASE FLUSHPLEASE FLUSHPLEASE FLUSHPLEASE FLUSHPLEASE FLUSHPLEASE FLUSHPLEASE FLUSHPLEASE FLUSH
+    WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
+    return 0;
 }
 
 int yalnix_delay(int clock_ticks) {
@@ -467,6 +499,20 @@ MySwitchFuncNormal(SavedContext *ctxp, void *p1, void *p2) {
 void
 printPCBInfo(struct pcb *pcb1) {
     TracePrintf(0, "printPCBInfo | pid: %d, SavedContext Addr: %d, PT0 VA: %d, PT0 PA: %d, \nbrkAddr: %d, stackAddr: %d, ptNode addr: %d, ptNodeIdx: %d\n", pcb1->pid, (uintptr_t)(pcb1->ctx), (uintptr_t)(pcb1->PT0), pcb1->ptNode->addr[pcb1->ptNodeIdx],(uintptr_t)pcb1->brkAddr, (uintptr_t)pcb1->stackAddr, (uintptr_t)pcb1->ptNode, pcb1->ptNodeIdx);
+}
+
+void
+printPT(struct pte *PT, int printValid) {
+    unsigned int i;
+    for (i = 0; i < PAGE_TABLE_LEN; i++) {
+        if (printValid) {
+            if (PT[i].valid) {
+                TracePrintf(0, "vpn %d, valid %d, pfn %d, first byte: %d\n", i, PT[i].valid, PT[i].pfn, *(uintptr_t *)(uintptr_t)(i << PAGESHIFT));
+            }
+        } else {
+            TracePrintf(0, "vpn %d, valid %d, pfn %d, first byte: %d\n", i, PT[i].valid, PT[i].pfn, *(uintptr_t *)(uintptr_t)(i << PAGESHIFT));
+        }
+    }
 }
 
 /**
