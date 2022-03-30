@@ -15,6 +15,7 @@ struct ptNode {
     struct ptNode *next;
     uintptr_t addr[2];
     bool valid[2];
+    uintptr_t VA[2];
 };
 
 struct pcb {
@@ -27,12 +28,14 @@ struct pcb {
     struct ptNode *ptNode;
     int ptNodeIdx;
     int delay;
+    int forkReturn;
 };
 
 bool vm_enabled = false;  // indicates if virtual memory has been enabled, used in SetKernelBrk
 bool initLoaded = false;
 void *kernel_brk;  // first address not part of kernel heap
 int setKernelBrkCount = 0;
+int nextProcessID = 2;
 
 int freePages = 0;
 uintptr_t nextFreePage;
@@ -47,10 +50,11 @@ struct pcb *next_delay_pcb = NULL;
 struct pcb *idle_pcb;
 
 struct ptNode *startptNode;
-int numProcesses = 0;
-int numSlots = 0;
+int numProcesses; // number of total processes
+int numSlots; // number of slots total
 int numReadyProcesses = 0;
 int processTickCount = 0;
+uintptr_t nextVAforPageTable = VMEM_1_LIMIT - PAGESIZE * 2;
 
 int countargs;
 
@@ -77,9 +81,13 @@ int yalnix_tty_write();
 void idle_process();
 int get_free_page();
 void free_physical_page(int index);
+
+void addToReadyQ (struct pcb *add);
+
 int LoadProgram(char *name, char **args, ExceptionInfo *info, struct pcb *loadPcb);
 SavedContext *MySwitchFuncNormal(SavedContext *ctxp, void *p1, void *p2); 
 SavedContext *MySwitchFuncIdleInit(SavedContext *ctxp, void *p1, void *p2);
+SavedContext *mySwitchFuncFork(SavedContext *ctxp, void *p1, void *p2);
 
 void printPT(struct pte *PT, int printValid);
 
@@ -251,9 +259,75 @@ void TRAP_TRANSMIT_handler(ExceptionInfo *info)
  
  */
 int yalnix_fork() {
+    TracePrintf(0, "In yalnix_fork\n");
     // create new process id
+    int newId = nextProcessID++;
+
     // allocate new PCB
-    // copy parent kernel stsack including exception info
+    struct pcb *childPCB = malloc(sizeof(struct pcb));
+    childPCB->pid = newId;
+
+    // set and allocate page table for region 0
+    if (numSlots > numProcesses) { // if there is a slot left,
+        struct ptNode *currPTNode = startptNode;
+        while (currPTNode->valid[0] == 1 && currPTNode->valid[1] == 1) {
+            currPTNode = currPTNode->next;
+            if (currPTNode == NULL) {
+                TracePrintf(0, "Fork: VERY BAD: reached end of ptNodes but found no empty slot\n");
+                Halt();
+            }
+        }
+        if (currPTNode->valid[0] == 0) {
+            childPCB->PT0 = (struct pte *) currPTNode->VA[0];
+            childPCB->ptNodeIdx = 0;
+        } else if (currPTNode->valid[1] == 0) {
+            childPCB->PT0 = (struct pte *) currPTNode->VA[1];
+            childPCB->ptNodeIdx = 1;
+        } else {
+            TracePrintf(0, "Fork: VERY BAD: no empty slot!!\n");
+            Halt();
+        }
+        childPCB->ptNode = currPTNode;
+    } else if (numSlots == numProcesses) { // if there are no slots left
+        struct ptNode *newNode = malloc(sizeof(struct ptNode));
+        newNode->next = startptNode->next;
+        startptNode->next = newNode;
+        uintptr_t freePagePA = (uintptr_t) (get_free_page() << PAGESHIFT);
+        newNode->addr[0] = freePagePA;
+        newNode->addr[1] = freePagePA + PAGESIZE/2;
+        newNode->valid[0] = 1;
+        newNode->valid[1] = 0;
+        newNode->VA[0] = nextVAforPageTable;
+        newNode->VA[1] = nextVAforPageTable + PAGESIZE/2;
+
+        int freePagePT1Idx = (nextVAforPageTable >> PAGESHIFT) - PAGE_TABLE_LEN;
+        pageTable1[freePagePT1Idx].valid = 1;
+        pageTable1[freePagePT1Idx].kprot = PROT_READ | PROT_WRITE;
+        pageTable1[freePagePT1Idx].uprot = PROT_READ | PROT_WRITE;
+        pageTable1[freePagePT1Idx].pfn = freePagePA >> PAGESHIFT;
+        nextVAforPageTable -= PAGESIZE;
+        numSlots += 2;
+        
+        childPCB->PT0 = (struct pte *) newNode->VA[0];
+        childPCB->ptNode = newNode;
+        childPCB->ptNodeIdx = 0;
+    }
+    numProcesses += 1;
+
+
+    childPCB->brkAddr = active_pcb->brkAddr;
+    childPCB->stackAddr = active_pcb->stackAddr;
+    childPCB->delay = 0;
+    
+
+    // struct pcb {
+    // SavedContext *ctx;
+    // struct pcb *next;
+
+    // copy parent kernel stack including exception info
+
+    // copy text data bss heap
+
     // allocate new memory for child process
     // copy parent address space into child
     
@@ -263,10 +337,88 @@ int yalnix_fork() {
     // ExceptionInfo is on the kernel stack, and each process has its own kernel stack, so each has its own ExceptionInfo.  You don't ever need to save and restore the ExecptionInfo
     
     // return” in both processes by scheduling both to run in our queue(s)
-    TracePrintf(0, "In yalnix_fork\n");
-    Halt();
+
+
+    active_pcb->forkReturn = childPCB->pid;
+    childPCB->forkReturn = 0;
+
+    addToReadyQ(childPCB);
+
+    ContextSwitch(mySwitchFuncFork, active_pcb->ctx, active_pcb, childPCB);
+
+    // In mySwitchFuncFork:
+        // The savedcontext that is returned should be the one that's been updated by ContextSwitch
+        // Switch the page table to child
+        // return as the child
+
+
+    return active_pcb->forkReturn;
 }
 
+void
+addToReadyQ (struct pcb *add) {
+    if (ready_pcb_head == NULL && ready_pcb_tail == NULL) {
+        ready_pcb_head = add;
+        ready_pcb_tail = add;
+    } else if (ready_pcb_head == NULL || ready_pcb_tail == NULL) {
+        TracePrintf(0, "addToReadyQ: YOU IDIOT you messed up bookeeping for head and tail\n");
+        Halt();
+    } else {
+        ready_pcb_tail->next = add;
+        ready_pcb_tail = add;
+    }
+}
+
+SavedContext *
+mySwitchFuncFork(SavedContext *ctxp, void *p1, void *p2) {
+    struct pcb *parent = (struct pcb *)p1;
+    struct pcb *child = (struct pcb *)p2;
+    uintptr_t i;
+    
+    // copy page tables,
+    struct pte svdPTE;
+    int borrowpfn = PAGE_TABLE_LEN - 1;
+    uintptr_t borrowedAddrVA = (uintptr_t) (VMEM_1_LIMIT - PAGESIZE);
+
+    svdPTE.pfn = pageTable1[borrowpfn].pfn; // REMINDER: this might be fatal if our Kernel heap gets too large
+    svdPTE.kprot = pageTable1[borrowpfn].kprot;
+    svdPTE.valid = pageTable1[borrowpfn].valid;
+    pageTable1[borrowpfn].valid = 1;
+    pageTable1[borrowpfn].kprot = PROT_READ | PROT_WRITE;
+
+    for (i = 0; i < KERNEL_STACK_LIMIT >> PAGESHIFT; i++ ) {
+        //TracePrintf(0, "In mySwitchFuncFork, i = %d\n", i);
+        struct pte newEntry;
+        // check if pte is valid in parent's page table
+        if (parent->PT0[i].valid == 1) { // if it is, allocate a page,  memcpy it to child's address
+            //TracePrintf(0, "In mySwitchFuncFork If\n");
+            newEntry.valid = 1;
+            newEntry.kprot = parent->PT0[i].kprot;
+            newEntry.uprot = parent->PT0[i].uprot;
+            newEntry.pfn = get_free_page();
+            child->PT0[i] = newEntry;
+
+            pageTable1[borrowpfn].pfn = child->PT0[i].pfn;
+            memcpy((void *)(borrowedAddrVA), (void *) (i << PAGESHIFT), PAGESIZE);
+            WriteRegister(REG_TLB_FLUSH, (RCS421RegVal)borrowedAddrVA); // flush borrowed pte
+        } else { // if it's not, assign 0 to valid bit
+            //TracePrintf(0, "In mySwitchFuncFork else\n");
+            newEntry.valid = 0;
+            child->PT0[i] = newEntry;
+        }
+    }
+
+    pageTable1[PAGE_TABLE_LEN - 1].kprot = svdPTE.kprot;
+    pageTable1[PAGE_TABLE_LEN - 1].valid = svdPTE.valid;
+    pageTable1[PAGE_TABLE_LEN - 1].pfn = svdPTE.pfn;
+
+    WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
+
+    // PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH 
+    // return as ctxp
+    return ctxp;
+}
+    
 int yalnix_exec() {
     TracePrintf(0, "In yalnix_exec\n");
     Halt();
@@ -486,16 +638,7 @@ MySwitchFuncNormal(SavedContext *ctxp, void *p1, void *p2) {
     processTickCount = 0;
     return pcb2->ctx;
 }
-// struct pcb {
-//     int pid;
-//     SavedContext *ctx;
-//     struct pte *PT0; // virtual address of its page table
-//     struct pcb *next;
-//     void *brkAddr;
-//     void *stackAddr;
-//     struct ptNode *ptNode;
-//     int ptNodeIdx;
-// };
+
 void
 printPCBInfo(struct pcb *pcb1) {
     TracePrintf(0, "printPCBInfo | pid: %d, SavedContext Addr: %d, PT0 VA: %d, PT0 PA: %d, \nbrkAddr: %d, stackAddr: %d, ptNode addr: %d, ptNodeIdx: %d\n", pcb1->pid, (uintptr_t)(pcb1->ctx), (uintptr_t)(pcb1->PT0), pcb1->ptNode->addr[pcb1->ptNodeIdx],(uintptr_t)pcb1->brkAddr, (uintptr_t)pcb1->stackAddr, (uintptr_t)pcb1->ptNode, pcb1->ptNodeIdx);
@@ -559,6 +702,9 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     startptNode->addr[1] = (uintptr_t) kernel_brk + PAGESIZE/2;
     startptNode->valid[0] = 1;
     startptNode->valid[1] = 1;
+    startptNode->VA[0] = (uintptr_t) kernel_brk;
+    startptNode->VA[1] = (uintptr_t) kernel_brk + PAGESIZE/2;
+    startptNode->next = NULL;
     numProcesses = 2;
     numSlots = 2;
     kernel_brk += PAGESIZE;

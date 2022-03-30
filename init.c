@@ -22,5 +22,8 @@ int main()
     intarr2[2049] = 100;
     printf("intarr2[2049]: %d\n", intarr2[2049]);
     free(intarr2);
+
+    int ret = Fork();
+    printf("returned from fork: %d\n", ret);
     return 0;
 }
