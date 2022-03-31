@@ -22,12 +22,12 @@ struct exitedChild {
     int pid;
     int exitStatus;
     struct exitedChild *next;
-}
+};
 
 struct activeChild {
     struct pcb *childPCB;
     struct activeChild *next;
-}
+};
 
 struct pcb {
     int pid;
@@ -85,7 +85,7 @@ void TRAP_TRANSMIT_handler(ExceptionInfo *info);
 
 int yalnix_fork();
 int yalnix_exec();
-void yalnix_exit();
+void yalnix_exit(int status);
 int yalnix_wait();
 int yalnix_getpid();
 int yalnix_brk(uintptr_t addr);
@@ -98,6 +98,7 @@ int get_free_page();
 void free_physical_page(int index);
 
 void addToReadyQ (struct pcb *add);
+struct pcb *createDefaultPCB();
 
 int LoadProgram(char *name, char **args, ExceptionInfo *info, struct pcb *loadPcb);
 SavedContext *MySwitchFuncNormal(SavedContext *ctxp, void *p1, void *p2); 
@@ -105,6 +106,28 @@ SavedContext *MySwitchFuncIdleInit(SavedContext *ctxp, void *p1, void *p2);
 SavedContext *mySwitchFuncFork(SavedContext *ctxp, void *p1, void *p2);
 
 void printPT(struct pte *PT, int printValid);
+
+struct pcb *
+createDefaultPCB() {
+    struct pcb *ret = malloc(sizeof(struct pcb));
+
+    ret->pid = -1;
+    ret->ctx = NULL;
+    ret-> PT0 = NULL;
+    ret->next = NULL;
+    ret->brkAddr = NULL;
+    ret->stackAddr = NULL;
+    ret->ptNode = NULL;
+    ret->ptNodeIdx = -1;
+    ret->delay = 0;
+    ret->forkReturn = -1;
+    ret->exitedChildHead = NULL;
+    ret->exitedChildTail = NULL;
+    ret->children = NULL;
+    ret->parent = NULL;
+
+    return ret;
+};
 
 /*
  results from kernel call, all kernel call requests enter through here
@@ -125,7 +148,7 @@ void TRAP_KERNEL_handler(ExceptionInfo *info)
     } else if (code == YALNIX_EXEC) {
         result = yalnix_exec();
     } else if (code == YALNIX_EXIT) {
-        yalnix_exit();  // TODO: exit has no return
+        yalnix_exit((int) info->regs[1]);  // TODO: exit has no return
         return;
     } else if (code == YALNIX_WAIT) {
         result = yalnix_wait();
@@ -279,7 +302,7 @@ int yalnix_fork() {
     int newId = nextProcessID++;
 
     // allocate new PCB
-    struct pcb *childPCB = malloc(sizeof(struct pcb));
+    struct pcb *childPCB = createDefaultPCB();
     childPCB->pid = newId;
 
     // set and allocate page table for region 0
@@ -353,11 +376,13 @@ int yalnix_fork() {
     
     // return” in both processes by scheduling both to run in our queue(s)
 
-    struct activeChild activeChildStruct;
-    activeChildStruct.childPCB = childPCB;
-    activeChildStruct.next = active_pcb->children;
-    active_pcb->children = &activeChildStruct;
+    // initialize and assign activeChild struct
+    struct activeChild *activeChildStruct = malloc(sizeof(struct activeChild));
+    activeChildStruct->childPCB = childPCB;
+    activeChildStruct->next = active_pcb->children;
+    active_pcb->children = activeChildStruct;
 
+    // set parent of child
     childPCB->parent = active_pcb;
 
     active_pcb->forkReturn = childPCB->pid;
@@ -387,6 +412,26 @@ addToReadyQ (struct pcb *add) {
     } else {
         ready_pcb_tail->next = add;
         ready_pcb_tail = add;
+    }
+}
+
+struct pcb *
+popFromReadyQ() {
+    if (ready_pcb_head == NULL && ready_pcb_tail == NULL) {
+        TracePrintf(0, "popFromReadyQ: nothing in Q\n");
+        return NULL;
+    } else if (ready_pcb_head == NULL || ready_pcb_tail == NULL) {
+        TracePrintf(0, "addToReadyQ: YOU IDIOT you messed up bookeeping for head and tail\n");
+        Halt();
+    } else if (ready_pcb_head == ready_pcb_tail) {
+        struct pcb *ret = ready_pcb_head;
+        ready_pcb_tail = NULL;
+        ready_pcb_head = NULL;
+        return ret;
+    } else {
+        struct pcb *ret = ready_pcb_head;
+        ready_pcb_head = ready_pcb_head->next;
+        return ret;
     }
 }
 
@@ -445,17 +490,179 @@ int yalnix_exec() {
     Halt();
 }
 
-void yalnix_exit() {
-//    Exit(int status)
-    
-    // resources used by calling process should be freed
+/*
+ when process exits, if has children then children should conintue to run normally but w/out parent
+ when orphan exits, exit status is not saved or reported to parent
+ all resources should be freed except status (if not orphan)
+ 
+ when exits for last process (or last terminated by kernel), execute Halt
+ */
+void yalnix_exit(int status) {
     TracePrintf(0, "In yalnix_exit\n");
+    // if process has a parent (that is still running- check if parent is NULL), handle the exit structure
+    // malloc an exited_child struct and update the fields
+    if (active_pcb->parent != NULL) {
+        struct exitedChild *eChild = malloc(sizeof(struct exitedChild));
+        eChild->pid = active_pcb->pid;
+        eChild->exitStatus = status;
+
+        // take this pcb out of the parent's children list
+        if (active_pcb->parent->children->childPCB == active_pcb) {
+            struct activeChild *store = active_pcb->parent->children;
+            active_pcb->parent->children = active_pcb->parent->children->next;
+            free(store);
+        } else {
+            struct activeChild *nextChild = active_pcb->parent->children;
+            while (nextChild->next->childPCB != active_pcb) {
+                nextChild = nextChild->next;
+                if (nextChild == NULL) {
+                    TracePrintf(0, "yalnix_exit: YOU IDIOT YOU MESSED UP BOOKKEEPING FOR CHILDREN LIST");
+                }
+            }
+            struct activeChild *store = nextChild->next;
+            nextChild->next = nextChild->next->next;
+            free(store);
+        }
+
+        // update parent exitedchild queue // get the parent pcb and add the struct to the llist of exited children
+        if (active_pcb->parent->exitedChildHead == NULL && active_pcb->parent->exitedChildTail == NULL) { // nothing in exitedChildQ
+            active_pcb->parent->exitedChildHead = eChild;
+            active_pcb->parent->exitedChildTail = eChild;
+        } else if (active_pcb->parent->exitedChildHead == NULL || active_pcb->parent->exitedChildTail == NULL) {
+            TracePrintf(0, "yalnix_exit: YOU IDIOT YOU MESSED UP BOOKKEEPING\n");
+            Halt();
+        } else { // something in exitedChildQ
+            active_pcb->parent->exitedChildTail->next = eChild;
+            active_pcb->parent->exitedChildTail = eChild;
+        }
+    }
+
+    // for all children of this process, set parent to null
+    struct activeChild *currChild = active_pcb->children;
+    while (currChild != NULL) {
+        currChild->childPCB->parent = NULL;
+        currChild = currChild->next;
+    }
+
+    // free physical pages used in PT0:
+    // for each valid PTE, use free_physical_page, then set valid bit to 0 (we already set to 0 in free_physical_page)
+    int i;
+    for (i = 0; i < USER_STACK_LIMIT >> PAGESHIFT; i++) {
+        TracePrintf(0, "yalnix_exit: free physical pages in pt0: %d\n", i);
+        if (active_pcb->PT0[i].valid) {
+            free_physical_page(active_pcb->PT0[i].pfn);
+            TracePrintf(0, "yalnix_exit: freed physical page: %d\n", i);
+        }
+    }
+
+    
+    
+    // update ptNode llist (free PT0 allocated memory):
+        // if other slot in ptNode is also free, then free page, free ptNode, and remove from llist
+    struct ptNode *thisNode = active_pcb->ptNode;
+    if (thisNode->valid[1 - active_pcb->ptNodeIdx] == 0) {
+        free_physical_page((int) (thisNode->addr[0] >> PAGESHIFT));
+        struct ptNode *currNode = startptNode;
+        while (currNode->next != thisNode) { // don't need to check for first one because the init-idle block is going to be first
+            currNode = thisNode->next;
+        }
+        currNode->next = currNode->next->next;
+        free(thisNode);
+        numSlots -= 2;
+    } else { // otherwise, set ptNode valid to valid
+        thisNode->valid[active_pcb->ptNodeIdx] = 0;
+    }
+    // update numProcesses (down), numSlots (up)
+    numProcesses -= 1;
+    
+    // NEED TODO? free any internal fields that were malloced NEED TODO?
+    // free PCB:
+    free(active_pcb);
+    
+    // if this was last process (nothing in ready or blocked)
+        // also free idle
+        // Halt();
+    if (ready_pcb_head == NULL && ready_pcb_tail == NULL) {
+        if (next_delay_pcb == NULL) {
+            // NEED TODO? free idle
+            Halt();
+        } else { // nothing ready but something delayed, so switch to idle
+            active_pcb = idle_pcb;
+            ContextSwitch(MySwitchFuncNormal, active_pcb->ctx, active_pcb, active_pcb); // the middle two arguments don't really matter here, we don't want to save ctx anyway
+        }
+    } else if (ready_pcb_head == NULL || ready_pcb_tail == NULL) {
+        TracePrintf(0, "yalnix_exit: IDIOTIC BOOKKEEPING\n");
+        Halt();
+    } else {
+        struct pcb *next_pcb = popFromReadyQ();
+        if (next_pcb == NULL) {
+            TracePrintf(0, "yalnix_exit: something's wrong (null case already taken care of above)\n");
+            Halt();
+        }
+        active_pcb = next_pcb;
+        ContextSwitch(MySwitchFuncNormal, active_pcb->ctx, active_pcb, active_pcb); // the middle two arguments don't really matter here, we don't want to save ctx anyway
+    }
+    
+    // set a new active_pcb and context switch to it? (or handle active_pcb is null elsewhere)
+    TracePrintf(0, "yalnix_exit: we... shouldn't get here");
     Halt();
 }
 
+/*
+ collect the process ID, exit status returned by child process of calling program
+ when child exits, exit status should be added to queue of child processes not yet collected by parent
+ child info removed after wait
+ if has no child processes (exited or running) should return ERROR, status_ptr unchanced
+
+ */
 int yalnix_wait() {
     TracePrintf(0, "In yalnix_wait\n");
     Halt();
+    /*
+     waiting for any child process to exit? doesn't matter which child process
+     */
+    
+    // if there are no child processes (exited or running)
+        // return ERROR
+    
+    
+    // if a child process has already exited (if next_exit != NULL)
+        // get exit status, etc. from exited_child struct
+        // update exited children llist (remove child from next_exit llist)
+        // return child process's exit status information
+    
+    // if no child processes have exited yet (next_exit == NULL)
+        // block until next child exits/terminated
+        // add pcb to blocked queue- need to have specific wait_block queue, check in clock handler
+        // set new active pcb, context switch to it? (or handle null active pcb)
+    
+    /*
+     each process (pcb) needs to know
+        state (running/exited) of each child
+        exit status and pid of exited children
+        its parent (to update info when exit)
+        
+     struct exited_child {
+        int state = 0;
+        int pid = 0;
+        exit status;
+        struct *exit_info next;
+     }
+     
+     add to pcb:    struct exited_child *next_exit; // llist of exited children and their status/pid
+                    maybe also a tail bc this needs to be a queue
+                    struct pcb *run_children; llist of running children
+                    struct pcb *next_child;
+                    struct pcb *parent; // pointer to parent
+                    
+     
+     or might be better to just make an exit_status struct that all pcbs have
+        state, pid, exit status, child llist, parent
+     
+     ** make sure to update new pcb fields for idle, init **
+        
+     */
+    
 }
 
 int yalnix_getpid() {
@@ -934,13 +1141,31 @@ void free_physical_page(int index) {
     uintptr_t *actualAddr = (uintptr_t *) addrNum;
     *actualAddr = nextFreePage;
     
-    // struct pte svdPTE;
-    // svdPTE.pfn = pageTable1[PAGE_TABLE_LEN - 1].pfn; // REMINDER: this might be fatal if our Kernel heap gets too large
-    // svdPTE.kprot = pageTable1[PAGE_TABLE_LEN - 1].kprot;
-    // svdPTE.valid = pageTable1[PAGE_TABLE_LEN - 1].valid;
-    // pageTable1[PAGE_TABLE_LEN - 1].valid = 1;
-    // pageTable1[PAGE_TABLE_LEN - 1].pfn = index;
-    // pageTable1[PAGE_TABLE_LEN - 1].kprot = PROT_READ | PROT_WRITE;
+    // int borrowpfn = PAGE_TABLE_LEN - 1;
+    // uintptr_t borrowedAddrVA = (uintptr_t) (VMEM_1_LIMIT - PAGESIZE);
+    // svdPTE.pfn = pageTable1[borrowpfn].pfn; // REMINDER: this might be fatal if our Kernel heap gets too large
+    // svdPTE.kprot = pageTable1[borrowpfn].kprot;
+    // svdPTE.valid = pageTable1[borrowpfn].valid;
+    // pageTable1[borrowpfn].valid = 1;
+    // pageTable1[borrowpfn].kprot = PROT_READ | PROT_WRITE;
+    
+    
+    // for (i = KERNEL_STACK_BASE; i < KERNEL_STACK_LIMIT; i += PAGESIZE) {
+    //     struct pte entry2;
+    //     entry2.valid = 1;
+    //     entry2.kprot = (PROT_READ|PROT_WRITE);
+    //     entry2.uprot = PROT_NONE;
+    //     entry2.pfn = get_free_page();
+    //     pcb2->PT0[i >> PAGESHIFT] = entry2; // fix this
+        
+    //     pageTable1[borrowpfn].pfn = pcb2->PT0[i >> PAGESHIFT].pfn;
+    //     memcpy((void *)(borrowedAddrVA), (void *) i, PAGESIZE);
+    //     WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) borrowedAddrVA);
+    // }
+    
+    // pageTable1[PAGE_TABLE_LEN - 1].kprot = svdPTE.kprot;
+    // pageTable1[PAGE_TABLE_LEN - 1].valid = svdPTE.valid;
+    // pageTable1[PAGE_TABLE_LEN - 1].pfn = svdPTE.pfn;
 
     // set nextFreePage to the physical address of the pfn of the page to be freed
     nextFreePage = (uintptr_t) ((active_pcb->PT0[index].pfn) << PAGESHIFT);
