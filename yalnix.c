@@ -497,33 +497,7 @@ int yalnix_exec() {
  
  when exits for last process (or last terminated by kernel), execute Halt
  */
-void yalnix_exit() {
-    
-    
-    // if process has a parent (that is still running- check if parent is NULL), handle the exit structure
-    // malloc an exited_child struct and update the fields
-    // get the parent pcb and add the struct to the llist of exited children
-    // for all children of this process, set parent to null
-
-    
-    // free physical pages used in PT0:
-    // for each valid PTE, use free_physical_page, then set valid bit to 0
-    
-    // update ptNode llist (free PT0 allocated memory):
-        // if other slot in ptNode is also free, then free page, free ptNode, and remove from llist
-        // otherwise, set ptNode valid to valid
-        // update numProcesses, numSlots
-    
-    // free PCB:
-    // free any internal fields that were malloced
-    
-    // if this was last process (nothing in ready or blocked)
-        // also free idle
-        // Halt();
-    
-    // set a new active_pcb and context switch to it? (or handle active_pcb is null elsewhere)
-    
-    
+void yalnix_exit(int status) {
     TracePrintf(0, "In yalnix_exit\n");
     // if process has a parent (that is still running- check if parent is NULL), handle the exit structure
     // malloc an exited_child struct and update the fields
@@ -644,8 +618,6 @@ void yalnix_exit() {
 int yalnix_wait() {
     TracePrintf(0, "In yalnix_wait\n");
     Halt();
-    
-    
     /*
      waiting for any child process to exit? doesn't matter which child process
      */
