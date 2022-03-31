@@ -18,6 +18,17 @@ struct ptNode {
     uintptr_t VA[2];
 };
 
+struct exitedChild {
+    int pid;
+    int exitStatus;
+    struct exitedChild *next;
+}
+
+struct activeChild {
+    struct pcb *childPCB;
+    struct activeChild *next;
+}
+
 struct pcb {
     int pid;
     SavedContext *ctx;
@@ -29,6 +40,10 @@ struct pcb {
     int ptNodeIdx;
     int delay;
     int forkReturn;
+    struct exitedChild *exitedChildHead;
+    struct exitedChild *exitedChildTail;
+    struct activeChild *children;
+    struct pcb *parent;
 };
 
 bool vm_enabled = false;  // indicates if virtual memory has been enabled, used in SetKernelBrk
@@ -338,6 +353,12 @@ int yalnix_fork() {
     
     // return” in both processes by scheduling both to run in our queue(s)
 
+    struct activeChild activeChildStruct;
+    activeChildStruct.childPCB = childPCB;
+    activeChildStruct.next = active_pcb->children;
+    active_pcb->children = &activeChildStruct;
+
+    childPCB->parent = active_pcb;
 
     active_pcb->forkReturn = childPCB->pid;
     childPCB->forkReturn = 0;
