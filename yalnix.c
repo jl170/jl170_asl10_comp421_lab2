@@ -388,9 +388,15 @@ int yalnix_fork() {
     active_pcb->forkReturn = childPCB->pid;
     childPCB->forkReturn = 0;
 
-    addToReadyQ(childPCB);
+    struct pcb* prev_pcb = active_pcb;
+    addToReadyQ(active_pcb);
+    active_pcb = childPCB;
+    
+    if (childPCB->ctx == NULL) {
+        childPCB->ctx = malloc(sizeof(SavedContext));
+    }
 
-    ContextSwitch(mySwitchFuncFork, active_pcb->ctx, active_pcb, childPCB);
+    ContextSwitch(mySwitchFuncFork, prev_pcb->ctx, prev_pcb, active_pcb);
 
     // In mySwitchFuncFork:
         // The savedcontext that is returned should be the one that's been updated by ContextSwitch
@@ -440,6 +446,9 @@ mySwitchFuncFork(SavedContext *ctxp, void *p1, void *p2) {
     struct pcb *parent = (struct pcb *)p1;
     struct pcb *child = (struct pcb *)p2;
     uintptr_t i;
+    //child->ctx = malloc(sizeof(SavedContext));
+    //memcpy((void *)child->ctx, (void *)ctxp, sizeof(SavedContext));
+    //TracePrintf(0, "CHILD CTX: %d\n", (uintptr_t)child->ctx);
     
     // copy page tables,
     struct pte svdPTE;
@@ -466,6 +475,7 @@ mySwitchFuncFork(SavedContext *ctxp, void *p1, void *p2) {
 
             pageTable1[borrowpfn].pfn = child->PT0[i].pfn;
             memcpy((void *)(borrowedAddrVA), (void *) (i << PAGESHIFT), PAGESIZE);
+            TracePrintf(0, "copied from %d to %d, index %d, VA %d to %d\n", parent->PT0[i].pfn, child->PT0[i].pfn, i, i << PAGESHIFT, borrowedAddrVA);
             WriteRegister(REG_TLB_FLUSH, (RCS421RegVal)borrowedAddrVA); // flush borrowed pte
         } else { // if it's not, assign 0 to valid bit
             //TracePrintf(0, "In mySwitchFuncFork else\n");
@@ -478,6 +488,7 @@ mySwitchFuncFork(SavedContext *ctxp, void *p1, void *p2) {
     pageTable1[PAGE_TABLE_LEN - 1].valid = svdPTE.valid;
     pageTable1[PAGE_TABLE_LEN - 1].pfn = svdPTE.pfn;
 
+    WriteRegister(REG_PTR0, child->ptNode->addr[child->ptNodeIdx]);
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
 
     // PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH 
@@ -545,12 +556,13 @@ void yalnix_exit(int status) {
     }
 
     // free physical pages used in PT0:
-    // for each valid PTE, use free_physical_page, then set valid bit to 0 (we already set to 0 in free_physical_page)
+    // for each valid PTE, use free_physical_page, then set valid bit to 0
     int i;
     for (i = 0; i < USER_STACK_LIMIT >> PAGESHIFT; i++) {
-        TracePrintf(0, "yalnix_exit: free physical pages in pt0: %d\n", i);
+        TracePrintf(0, "yalnix_exit: free physical pages in pt0: %d / %d\n", i, USER_STACK_LIMIT >> PAGESHIFT);
         if (active_pcb->PT0[i].valid) {
             free_physical_page(active_pcb->PT0[i].pfn);
+            active_pcb->PT0[i].valid = 0;
             TracePrintf(0, "yalnix_exit: freed physical page: %d\n", i);
         }
     }
@@ -584,6 +596,7 @@ void yalnix_exit(int status) {
         // Halt();
     if (ready_pcb_head == NULL && ready_pcb_tail == NULL) {
         if (next_delay_pcb == NULL) {
+            TracePrintf(0, "No ready, no delayed processes. Bye Bye!\n");
             // NEED TODO? free idle
             Halt();
         } else { // nothing ready but something delayed, so switch to idle
@@ -599,8 +612,14 @@ void yalnix_exit(int status) {
             TracePrintf(0, "yalnix_exit: something's wrong (null case already taken care of above)\n");
             Halt();
         }
+        TracePrintf(0, "Next pcb: %d\n", (uintptr_t)next_pcb->pid);
+        struct pcb *prev_pcb = active_pcb;
         active_pcb = next_pcb;
-        ContextSwitch(MySwitchFuncNormal, active_pcb->ctx, active_pcb, active_pcb); // the middle two arguments don't really matter here, we don't want to save ctx anyway
+        if (active_pcb->ctx == NULL) {
+            active_pcb->ctx = malloc(sizeof(SavedContext));
+        }
+        //TracePrintf(0, "CHILD CTX: %d\n", (uintptr_t)active_pcb->ctx);
+        ContextSwitch(MySwitchFuncNormal, prev_pcb->ctx, prev_pcb, active_pcb); // the middle two arguments don't really matter here, we don't want to save ctx anyway
     }
     
     // set a new active_pcb and context switch to it? (or handle active_pcb is null elsewhere)
@@ -697,8 +716,8 @@ int yalnix_brk(uintptr_t addr) {
     } else if ((uintptr_t) active_pcb->brkAddr <= roundedAddr) { // If roundedAddr < breakAddr
         // then free pages and update pt0, and breakAddr accordingly
         for (i = roundedAddr >> PAGESHIFT; i < (uintptr_t) active_pcb->brkAddr >> PAGESHIFT; i++) {
-            active_pcb->PT0[i].valid = 0;
             free_physical_page(i);
+            active_pcb->PT0[i].valid = 0;
         }
         active_pcb->brkAddr = (void *) roundedAddr;
     }
@@ -807,12 +826,13 @@ MySwitchFuncIdleInit(SavedContext *ctxp, void *p1, void *p2) {
     
     
     for (i = KERNEL_STACK_BASE; i < KERNEL_STACK_LIMIT; i += PAGESIZE) {
-        struct pte entry2;
-        entry2.valid = 1;
-        entry2.kprot = (PROT_READ|PROT_WRITE);
-        entry2.uprot = PROT_NONE;
-        entry2.pfn = get_free_page();
-        pcb2->PT0[i >> PAGESHIFT] = entry2; // fix this
+        struct pte *entry2 = malloc(sizeof(struct pte));
+        //TracePrintf(0, "YOYO: %d\n", (uintptr_t) entry2);
+        entry2->valid = 1;
+        entry2->kprot = (PROT_READ|PROT_WRITE);
+        entry2->uprot = PROT_NONE;
+        entry2->pfn = get_free_page();
+        pcb2->PT0[i >> PAGESHIFT] = *entry2; // fix this
         
         pageTable1[borrowpfn].pfn = pcb2->PT0[i >> PAGESHIFT].pfn;
         memcpy((void *)(borrowedAddrVA), (void *) i, PAGESIZE);
@@ -840,6 +860,7 @@ MySwitchFuncIdleInit(SavedContext *ctxp, void *p1, void *p2) {
 
 SavedContext *
 MySwitchFuncNormal(SavedContext *ctxp, void *p1, void *p2) {
+    TracePrintf(0, "In mySwitchFuncNormal\n");
     struct pcb *pcb1 = (struct pcb *) p1;
     (void)pcb1;
     (void)ctxp;
@@ -976,12 +997,14 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     // Region 0 before kernel stack
     for (i = 0; i < KERNEL_STACK_BASE >> PAGESHIFT; i++) {
         struct pte entry;
+       // TracePrintf(0, "YOYO entry: %d\n", (uintptr_t) &entry);
         entry.valid = 0;
         pageTable0[i] = entry;
         
         struct pte entry2;
         entry2.valid = 0;
         idlePageTable0[i] = entry2;
+        //TracePrintf(0, "YOYO entry2: %d\n", (uintptr_t) &entry2);
     }
     
     // Region 0 Kernel stack
@@ -992,6 +1015,7 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
         entry.uprot = PROT_NONE;
         entry.pfn = i;
         idlePageTable0[i] = entry;
+        //TracePrintf(0, "YOYO stack entry: %d\n", (uintptr_t) &entry);
 
         // struct pte entry2;
         // entry2.valid = 1;
@@ -1010,6 +1034,8 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
         entry.uprot = PROT_NONE;
         entry.pfn = i;
         pageTable1[i - PAGE_TABLE_LEN] = entry;
+        //TracePrintf(0, "YOYO text entry: %d\n", (uintptr_t) &entry);
+        //TracePrintf(0, "YOYO text entry inside: %d\n", &(*((struct pte *)(&(pageTable1[i - PAGE_TABLE_LEN])))));
     }
 
     // Region 1 Kernel data bss
@@ -1021,6 +1047,7 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
         entry.uprot = PROT_NONE;
         entry.pfn = i;
         pageTable1[i - PAGE_TABLE_LEN] = entry;
+        //TracePrintf(0, "YOYO data bss entry: %d\n", (uintptr_t) &entry);
     }
 
     // Region 1 above data bss
@@ -1029,6 +1056,7 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
         struct pte entry;
         entry.valid = 0;
         pageTable1[kernelBreak - PAGE_TABLE_LEN] = entry;
+        //TracePrintf(0, "YOYO above data bss entry: %d\n", (uintptr_t) &entry);
     }
     
 
@@ -1134,22 +1162,36 @@ int get_free_page() {
     return ret;
 }
 
+/**
+ * Index should be pfn
+ */
 void free_physical_page(int index) {
-    // Set the first offset of the page of the address to the previous nextfreepage
+    TracePrintf(0, "freeing physical page with index: %d\n", index);
     uintptr_t addrNum = 0;
     addrNum += index << PAGESHIFT;
-    uintptr_t *actualAddr = (uintptr_t *) addrNum;
-    *actualAddr = nextFreePage;
-    
-    // int borrowpfn = PAGE_TABLE_LEN - 1;
-    // uintptr_t borrowedAddrVA = (uintptr_t) (VMEM_1_LIMIT - PAGESIZE);
-    // svdPTE.pfn = pageTable1[borrowpfn].pfn; // REMINDER: this might be fatal if our Kernel heap gets too large
-    // svdPTE.kprot = pageTable1[borrowpfn].kprot;
-    // svdPTE.valid = pageTable1[borrowpfn].valid;
-    // pageTable1[borrowpfn].valid = 1;
-    // pageTable1[borrowpfn].kprot = PROT_READ | PROT_WRITE;
-    
-    
+    if (!vm_enabled) {
+        uintptr_t *actualAddr = (uintptr_t *) addrNum;
+        // Set the first offset of the page of the address to the previous nextfreepage
+        *actualAddr = nextFreePage;
+    } else {
+        struct pte svdPTE;
+        int borrowpfn = PAGE_TABLE_LEN - 1;
+        uintptr_t borrowedAddrVA = (uintptr_t) (VMEM_1_LIMIT - PAGESIZE);
+        svdPTE.pfn = pageTable1[borrowpfn].pfn; // REMINDER: this might be fatal if our Kernel heap gets too large
+        svdPTE.kprot = pageTable1[borrowpfn].kprot;
+        svdPTE.valid = pageTable1[borrowpfn].valid;
+        pageTable1[borrowpfn].valid = 1;
+        pageTable1[borrowpfn].kprot = PROT_READ | PROT_WRITE;
+        pageTable1[borrowpfn].pfn = index;
+
+        *((uintptr_t *) borrowedAddrVA) = nextFreePage;
+        //*actualAddr = nextFreePage;
+
+        pageTable1[PAGE_TABLE_LEN - 1].kprot = svdPTE.kprot;
+        pageTable1[PAGE_TABLE_LEN - 1].valid = svdPTE.valid;
+        pageTable1[PAGE_TABLE_LEN - 1].pfn = svdPTE.pfn;
+        WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) (borrowedAddrVA));
+    }
     // for (i = KERNEL_STACK_BASE; i < KERNEL_STACK_LIMIT; i += PAGESIZE) {
     //     struct pte entry2;
     //     entry2.valid = 1;
@@ -1163,12 +1205,11 @@ void free_physical_page(int index) {
     //     WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) borrowedAddrVA);
     // }
     
-    // pageTable1[PAGE_TABLE_LEN - 1].kprot = svdPTE.kprot;
-    // pageTable1[PAGE_TABLE_LEN - 1].valid = svdPTE.valid;
-    // pageTable1[PAGE_TABLE_LEN - 1].pfn = svdPTE.pfn;
+
 
     // set nextFreePage to the physical address of the pfn of the page to be freed
-    nextFreePage = (uintptr_t) ((active_pcb->PT0[index].pfn) << PAGESHIFT);
+    nextFreePage = (uintptr_t) addrNum;
+    //nextFreePage = (uintptr_t) ((active_pcb->PT0[index].pfn) << PAGESHIFT);
     
     // increment freePages
     freePages += 1;
@@ -1176,8 +1217,8 @@ void free_physical_page(int index) {
     // flush tlb
     WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) (addrNum));
     
-    // set valid bit to 0
-    active_pcb->PT0[index].valid = 0;
+    // set valid bit to 0 (do this after returning?)
+    //active_pcb->PT0[index].valid = 0;
 }
 
 
@@ -1344,7 +1385,7 @@ LoadProgram(char *name, char **args, ExceptionInfo *info, struct pcb *loadPcb)
         // will all be invalid for init and idle
         if (loadPcb->PT0[j].valid) {
             free_physical_page(j);
-            //active_pcb->PT0[j]->valid = 0;  // set invalid
+            active_pcb->PT0[j].valid = 0;  // set invalid
         }
     }
     
