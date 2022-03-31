@@ -424,17 +424,101 @@ int yalnix_exec() {
     Halt();
 }
 
+/*
+ when process exits, if has children then children should conintue to run normally but w/out parent
+ when orphan exits, exit status is not saved or reported to parent
+ all resources should be freed except status (if not orphan)
+ 
+ when exits for last process (or last terminated by kernel), execute Halt
+ */
 void yalnix_exit() {
-//    Exit(int status)
     
-    // resources used by calling process should be freed
+    
+    // if process has a parent (that is still running- check if parent is NULL), handle the exit structure
+    // malloc an exited_child struct and update the fields
+    // get the parent pcb and add the struct to the llist of exited children
+    // for all children of this process, set parent to null
+
+    
+    // free physical pages used in PT0:
+    // for each valid PTE, use free_physical_page, then set valid bit to 0
+    
+    // update ptNode llist (free PT0 allocated memory):
+        // if other slot in ptNode is also free, then free page, free ptNode, and remove from llist
+        // otherwise, set ptNode valid to valid
+        // update numProcesses, numSlots
+    
+    // free PCB:
+    // free any internal fields that were malloced
+    
+    // if this was last process (nothing in ready or blocked)
+        // also free idle
+        // Halt();
+    
+    // set a new active_pcb and context switch to it? (or handle active_pcb is null elsewhere)
+    
+    
     TracePrintf(0, "In yalnix_exit\n");
     Halt();
 }
 
+/*
+ collect the process ID, exit status returned by child process of calling program
+ when child exits, exit status should be added to queue of child processes not yet collected by parent
+ child info removed after wait
+ if has no child processes (exited or running) should return ERROR, status_ptr unchanced
+
+ */
 int yalnix_wait() {
     TracePrintf(0, "In yalnix_wait\n");
     Halt();
+    
+    
+    /*
+     waiting for any child process to exit? doesn't matter which child process
+     */
+    
+    // if there are no child processes (exited or running)
+        // return ERROR
+    
+    
+    // if a child process has already exited (if next_exit != NULL)
+        // get exit status, etc. from exited_child struct
+        // update exited children llist (remove child from next_exit llist)
+        // return child process's exit status information
+    
+    // if no child processes have exited yet (next_exit == NULL)
+        // block until next child exits/terminated
+        // add pcb to blocked queue- need to have specific wait_block queue, check in clock handler
+        // set new active pcb, context switch to it? (or handle null active pcb)
+    
+    /*
+     each process (pcb) needs to know
+        state (running/exited) of each child
+        exit status and pid of exited children
+        its parent (to update info when exit)
+        
+     struct exited_child {
+        int state = 0;
+        int pid = 0;
+        exit status;
+        struct *exit_info next;
+     }
+     
+     add to pcb:    struct exited_child *next_exit; // llist of exited children and their status/pid
+                    maybe also a tail bc this needs to be a queue
+                    struct pcb *run_children; llist of running children
+                    struct pcb *next_child;
+                    struct pcb *parent; // pointer to parent
+                    
+     
+     or might be better to just make an exit_status struct that all pcbs have
+        state, pid, exit status, child llist, parent
+     
+     ** make sure to update new pcb fields for idle, init **
+        
+     */
+    
 }
 
 int yalnix_getpid() {
