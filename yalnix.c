@@ -98,6 +98,7 @@ void idle_process();
 int get_free_page();
 void free_physical_page(int index);
 
+struct pcb *popFromReadyQ();
 void addToReadyQ (struct pcb *add);
 struct pcb *createDefaultPCB();
 
@@ -107,6 +108,8 @@ SavedContext *MySwitchFuncIdleInit(SavedContext *ctxp, void *p1, void *p2);
 SavedContext *mySwitchFuncFork(SavedContext *ctxp, void *p1, void *p2);
 
 void printPT(struct pte *PT, int printValid);
+void printPCBInfo(struct pcb *pcb1);
+void printCurrentState();
 
 struct pcb *
 createDefaultPCB() {
@@ -172,7 +175,7 @@ void TRAP_KERNEL_handler(ExceptionInfo *info)
 void TRAP_CLOCK_handler(ExceptionInfo *info)
 {
     TracePrintf(0, "\n\nIn TRAP_CLOCK_handler\n");
-    
+    printCurrentState();
     //check all process blocked on wait, if no longer blocked ad add to ready queue
     struct pcb *currWait = wait_pcb_head;
     struct pcb *prevWait, *next;
@@ -215,7 +218,7 @@ void TRAP_CLOCK_handler(ExceptionInfo *info)
                 ready_pcb_tail->next = currDelayProcess;
                 ready_pcb_tail = currDelayProcess;
             }
-            TracePrintf(0, "In clock handler, after adding 0 delay to ready list: head: %d, tail: %d\n", (uintptr_t)ready_pcb_head, (uintptr_t)ready_pcb_tail);
+            TracePrintf(0, "In clock handler, after adding 0 delay to ready list: head: %d, tail: %d\n", (uintptr_t)ready_pcb_head->pid, (uintptr_t)ready_pcb_tail->pid);
             prev = currDelayProcess;
             currDelayProcess = nextDelayProcess; // after we're all done, move pointer to currDelayProcess for next step
         } else { // if delay is not zero, then just move on
@@ -227,12 +230,11 @@ void TRAP_CLOCK_handler(ExceptionInfo *info)
     TracePrintf(0, "From Clock handler: processTickCount: %d\n", processTickCount);
     // increment processTickCount if processTickCount < 2
     if (processTickCount >= 2 || active_pcb->pid == 0) { // if tick count is >= 2,
-        TracePrintf(0, "ready_pcb_head: %d, tail: %d\n", (uintptr_t) ready_pcb_head, (uintptr_t) ready_pcb_tail);
         if (ready_pcb_head) { // if there is a process to switch to,
             if (active_pcb->pid == 0) {
-                TracePrintf(0, "idle was running, so contextSwitch from process %d to process: %d\n", active_pcb->pid, ready_pcb_tail->pid);
+                TracePrintf(0, "idle was running, so contextSwitch from process %d to process: %d\n", active_pcb->pid, ready_pcb_head->pid);
             } else {
-                TracePrintf(0, "processTickCount is >= 2, contextSwitch from process %d to process: %d\n", active_pcb->pid, ready_pcb_tail->pid);
+                TracePrintf(0, "processTickCount is >= 2, contextSwitch from process %d to process: %d\n", active_pcb->pid, ready_pcb_head->pid);
             }
             struct pcb *switchFrom;
             if (active_pcb->pid != 0) {
@@ -250,6 +252,7 @@ void TRAP_CLOCK_handler(ExceptionInfo *info)
             active_pcb->next = NULL; // set the next of the active pcb
 
             // context switch from the original process (which is now in ready_pcb_tail) to the ready process next in line (which is now active_pcb)
+            TracePrintf(0, "Switching from %d to %d\n", switchFrom->pid, active_pcb->pid);
             ContextSwitch(MySwitchFuncNormal, switchFrom->ctx, switchFrom, active_pcb); 
         }
     } else if (processTickCount < 2) {
@@ -431,40 +434,6 @@ int yalnix_fork() {
     return active_pcb->forkReturn;
 }
 
-void
-addToReadyQ (struct pcb *add) {
-    if (ready_pcb_head == NULL && ready_pcb_tail == NULL) {
-        ready_pcb_head = add;
-        ready_pcb_tail = add;
-    } else if (ready_pcb_head == NULL || ready_pcb_tail == NULL) {
-        TracePrintf(0, "addToReadyQ: YOU IDIOT you messed up bookeeping for head and tail\n");
-        Halt();
-    } else {
-        ready_pcb_tail->next = add;
-        ready_pcb_tail = add;
-    }
-}
-
-struct pcb *
-popFromReadyQ() {
-    if (ready_pcb_head == NULL && ready_pcb_tail == NULL) {
-        TracePrintf(0, "popFromReadyQ: nothing in Q\n");
-        return NULL;
-    } else if (ready_pcb_head == NULL || ready_pcb_tail == NULL) {
-        TracePrintf(0, "addToReadyQ: YOU IDIOT you messed up bookeeping for head and tail\n");
-        Halt();
-    } else if (ready_pcb_head == ready_pcb_tail) {
-        struct pcb *ret = ready_pcb_head;
-        ready_pcb_tail = NULL;
-        ready_pcb_head = NULL;
-        return ret;
-    } else {
-        struct pcb *ret = ready_pcb_head;
-        ready_pcb_head = ready_pcb_head->next;
-        return ret;
-    }
-}
-
 SavedContext *
 mySwitchFuncFork(SavedContext *ctxp, void *p1, void *p2) {
     TracePrintf(0, "In mySwitchFuncFork\n");
@@ -474,7 +443,7 @@ mySwitchFuncFork(SavedContext *ctxp, void *p1, void *p2) {
     //child->ctx = malloc(sizeof(SavedContext));
     //memcpy((void *)child->ctx, (void *)ctxp, sizeof(SavedContext));
     //TracePrintf(0, "CHILD CTX: %d\n", (uintptr_t)child->ctx);
-    
+    memcpy((void *)child->ctx, (void *)ctxp, sizeof(SavedContext));
     // copy page tables,
     struct pte svdPTE;
     int borrowpfn = PAGE_TABLE_LEN - 1;
@@ -487,7 +456,7 @@ mySwitchFuncFork(SavedContext *ctxp, void *p1, void *p2) {
     pageTable1[borrowpfn].kprot = PROT_READ | PROT_WRITE;
 
     for (i = 0; i < KERNEL_STACK_LIMIT >> PAGESHIFT; i++ ) {
-        TracePrintf(0, "In mySwitchFuncFork, i = %d\n", i);
+        //TracePrintf(0, "In mySwitchFuncFork, i = %d\n", i);
         struct pte newEntry;
         // check if pte is valid in parent's page table
         if (parent->PT0[i].valid == 1) { // if it is, allocate a page,  memcpy it to child's address
@@ -518,13 +487,14 @@ mySwitchFuncFork(SavedContext *ctxp, void *p1, void *p2) {
 
     // PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH 
     // return as ctxp
-    return ctxp;
+    return child->ctx;
 }
     
 void yalnix_exec(ExceptionInfo *info, char *filename, char **argvec) {
-    TracePrintf(0, "In yalnix_exec\n");
+    TracePrintf(0, "In yalnix_exec pid: %d\n", active_pcb->pid);
 
     LoadProgram(filename, argvec, info, active_pcb);
+    WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
 
     TracePrintf(0, "Finished yalnix_exec\n");
     //Halt();
@@ -601,18 +571,21 @@ void yalnix_exit(int status) {
     // update ptNode llist (free PT0 allocated memory):
         // if other slot in ptNode is also free, then free page, free ptNode, and remove from llist
     struct ptNode *thisNode = active_pcb->ptNode;
-    if (thisNode->valid[1 - active_pcb->ptNodeIdx] == 0) {
-        free_physical_page((int) (thisNode->addr[0] >> PAGESHIFT));
-        struct ptNode *currNode = startptNode;
-        while (currNode->next != thisNode) { // don't need to check for first one because the init-idle block is going to be first
-            currNode = thisNode->next;
-        }
-        currNode->next = currNode->next->next;
-        free(thisNode);
-        numSlots -= 2;
-    } else { // otherwise, set ptNode valid to valid
+    // TracePrintf(0, "before modifying ptNodes: pid: %d\n", active_pcb->pid);
+    // if (thisNode->valid[1 - active_pcb->ptNodeIdx] == 0) {
+    //     free_physical_page((int) (thisNode->addr[0] >> PAGESHIFT));
+    //     struct ptNode *currNode = startptNode;
+    //     TracePrintf(0, "Thisnode: %d, currNode->next: %d\n", thisNode->addr[0] >> PAGESHIFT, currNode->next->addr[0] >> PAGESHIFT);
+    //     while (currNode->next != thisNode) { // don't need to check for first one because the init-idle block is going to be first
+    //         currNode = currNode->next;
+    //         TracePrintf(0, "Thisnode: %d, currNode->next: %d\n", thisNode->addr[0] >> PAGESHIFT, currNode->next->addr[0] >> PAGESHIFT);
+    //     }
+    //     currNode->next = currNode->next->next;
+    //     free(thisNode);
+    //     numSlots -= 2;
+    // } else { // otherwise, set ptNode valid to valid
         thisNode->valid[active_pcb->ptNodeIdx] = 0;
-    }
+    //}
     // update numProcesses (down), numSlots (up)
     numProcesses -= 1;
     
@@ -792,22 +765,24 @@ int yalnix_brk(uintptr_t addr) {
 
 int yalnix_delay(int clock_ticks) {
     TracePrintf(0, "In yalnix_delay: %d ticks\n", clock_ticks);
+    printCurrentState();
     if (clock_ticks > 0) {
         active_pcb->delay = clock_ticks;
         struct pcb *prev_pcb = active_pcb;
         active_pcb->next = next_delay_pcb;
         next_delay_pcb = active_pcb;
-        if (numReadyProcesses > 0) {
+        if (ready_pcb_head) {
             active_pcb = ready_pcb_head; // the ready process head becomes the active process
             ready_pcb_head = ready_pcb_head->next; // the "next" of the ready process head becomes the ready process head
             active_pcb->next = NULL; // the new active process has its next field reset
-            numReadyProcesses -= 1; // we essentially pulled a node out of the ready process
-            if (numReadyProcesses == 0) { // if ready Q is empty
+            //numReadyProcesses -= 1; // we essentially pulled a node out of the ready process
+            if (ready_pcb_head == NULL) { // if ready Q is empty
                 ready_pcb_tail = NULL;
             }
         } else {
             active_pcb = idle_pcb;
         }
+        TracePrintf(0, "Switching from %d to %d\n", prev_pcb->pid, active_pcb->pid);
         ContextSwitch(MySwitchFuncNormal, prev_pcb->ctx, prev_pcb, active_pcb);
     } else if (clock_ticks < 0) {
         return ERROR;
@@ -878,6 +853,7 @@ MySwitchFuncIdleInit(SavedContext *ctxp, void *p1, void *p2) {
     struct pcb *pcb2 = (struct pcb *) p2;
     uintptr_t i;
     struct pte svdPTE;
+    memcpy((void*)pcb2->ctx, (void*)ctxp, sizeof(SavedContext));
 
     int borrowpfn = PAGE_TABLE_LEN - 1;
     uintptr_t borrowedAddrVA = (uintptr_t) (VMEM_1_LIMIT - PAGESIZE);
@@ -916,9 +892,9 @@ MySwitchFuncIdleInit(SavedContext *ctxp, void *p1, void *p2) {
     TracePrintf(0, "Returning from myswitchfuncIdleInit..\n");
     active_pcb = pcb2;
     processTickCount = 0;
-    return ctxp;
+    //return ctxp;
     
-    //return pcb2->ctx;
+    return pcb2->ctx;
 }
 
 SavedContext *
@@ -949,25 +925,6 @@ MySwitchFuncNormal(SavedContext *ctxp, void *p1, void *p2) {
     TracePrintf(0, "Returning from MySwitchFuncNormal..\n");
     processTickCount = 0;
     return pcb2->ctx;
-}
-
-void
-printPCBInfo(struct pcb *pcb1) {
-    TracePrintf(0, "printPCBInfo | pid: %d, SavedContext Addr: %d, PT0 VA: %d, PT0 PA: %d, \nbrkAddr: %d, stackAddr: %d, ptNode addr: %d, ptNodeIdx: %d\n", pcb1->pid, (uintptr_t)(pcb1->ctx), (uintptr_t)(pcb1->PT0), pcb1->ptNode->addr[pcb1->ptNodeIdx],(uintptr_t)pcb1->brkAddr, (uintptr_t)pcb1->stackAddr, (uintptr_t)pcb1->ptNode, pcb1->ptNodeIdx);
-}
-
-void
-printPT(struct pte *PT, int printValid) {
-    unsigned int i;
-    for (i = 0; i < PAGE_TABLE_LEN; i++) {
-        if (printValid) {
-            if (PT[i].valid) {
-                TracePrintf(0, "vpn %d, valid %d, pfn %d, first byte: %d\n", i, PT[i].valid, PT[i].pfn, *(uintptr_t *)(uintptr_t)(i << PAGESHIFT));
-            }
-        } else {
-            TracePrintf(0, "vpn %d, valid %d, pfn %d, first byte: %d\n", i, PT[i].valid, PT[i].pfn, *(uintptr_t *)(uintptr_t)(i << PAGESHIFT));
-        }
-    }
 }
 
 /**
@@ -1163,7 +1120,7 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     active_pcb = idle_pcb;
     char *idle_args[2] = {"idle", NULL};
     TracePrintf(0, "Starting loadProgram\n");
-    LoadProgram(idle_args[0], &idle_args[0], info, active_pcb);
+    //LoadProgram(idle_args[0], &idle_args[0], info, active_pcb);
     
 
     TracePrintf(0, "Starting contextswitch...\n");
@@ -1173,6 +1130,8 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     //Halt();
     TracePrintf(0, "regptr0: %d, regidle: %d, reginit: %d\n", (uintptr_t) ReadRegister(REG_PTR0), idle_pcb->ptNode->addr[idle_pcb->ptNodeIdx], init_pcb->ptNode->addr[init_pcb->ptNodeIdx]);
     if (initLoaded) {
+        LoadProgram(idle_args[0], &idle_args[0], info, active_pcb);
+        //TracePrintf(0, "regptr0: %d, regidle: %d, reginit: %d\n", (uintptr_t) ReadRegister(REG_PTR0), idle_pcb->ptNode->addr[idle_pcb->ptNodeIdx], init_pcb->ptNode->addr[init_pcb->ptNodeIdx]);
         return;
     } else {
         initLoaded = true;
@@ -1235,7 +1194,7 @@ int get_free_page() {
  * Index should be pfn
  */
 void free_physical_page(int index) {
-    TracePrintf(0, "freeing physical page with index: %d\n", index);
+    TracePrintf(0, "freeing physical page with pfn: %d\n", index);
     uintptr_t addrNum = 0;
     addrNum += index << PAGESHIFT;
     if (!vm_enabled) {
@@ -1452,8 +1411,9 @@ LoadProgram(char *name, char **args, ExceptionInfo *info, struct pcb *loadPcb)
     
     for (j = MEM_INVALID_PAGES >> PAGESHIFT; j < KERNEL_STACK_BASE >> PAGESHIFT; j++) {
         // will all be invalid for init and idle
+        //TracePrintf(0, "Trying to free physical page with pfn %d\n", j);
         if (loadPcb->PT0[j].valid) {
-            free_physical_page(j);
+            free_physical_page(loadPcb->PT0[j].pfn);
             active_pcb->PT0[j].valid = 0;  // set invalid
         }
     }
@@ -1623,3 +1583,94 @@ LoadProgram(char *name, char **args, ExceptionInfo *info, struct pcb *loadPcb)
 }
 
 
+void
+printCurrentState() {
+    TracePrintf(0, "-- Printing current State --\n");
+    TracePrintf(0, "Active pcb: %d\n", active_pcb->pid);
+    if (ready_pcb_head) {
+        struct pcb *currPCB = ready_pcb_head;
+        TracePrintf(0, "Ready Queue:\n");
+        while (currPCB) {
+            TracePrintf(0, "Ready pcb: %d -> \n", currPCB->pid);
+            currPCB = currPCB->next;
+        }
+    } else {
+        TracePrintf(0, "Ready Queue Empty\n");
+    }
+    
+    if (next_delay_pcb) {
+        struct pcb *currPCB = next_delay_pcb;
+        TracePrintf(0, "Delay list:\n");
+        while (currPCB) {
+            TracePrintf(0, "Delayed pcb: %d -> \n", currPCB->pid);
+            currPCB = currPCB->next;
+        }
+    } else {
+        TracePrintf(0, "Delay list Empty\n");
+    }
+
+    if (wait_pcb_head) {
+        struct pcb *currPCB = next_delay_pcb;
+        TracePrintf(0, "Wait list:\n");
+        while (currPCB) {
+            TracePrintf(0, "Waiting pcb: %d -> \n", currPCB->pid);
+            currPCB = currPCB->next;
+        }
+    } else {
+        TracePrintf(0, "Waiting list Empty\n");
+    }
+    TracePrintf(0, "-- End printing current state-- \n");
+}
+
+void
+printPCBInfo(struct pcb *pcb1) {
+    TracePrintf(0, "printPCBInfo | pid: %d, SavedContext Addr: %d, PT0 VA: %d, PT0 PA: %d, \nbrkAddr: %d, stackAddr: %d, ptNode addr: %d, ptNodeIdx: %d\n", pcb1->pid, (uintptr_t)(pcb1->ctx), (uintptr_t)(pcb1->PT0), pcb1->ptNode->addr[pcb1->ptNodeIdx],(uintptr_t)pcb1->brkAddr, (uintptr_t)pcb1->stackAddr, (uintptr_t)pcb1->ptNode, pcb1->ptNodeIdx);
+}
+
+void
+printPT(struct pte *PT, int printValid) {
+    unsigned int i;
+    for (i = 0; i < PAGE_TABLE_LEN; i++) {
+        if (printValid) {
+            if (PT[i].valid) {
+                TracePrintf(0, "vpn %d, valid %d, pfn %d, first byte: %d\n", i, PT[i].valid, PT[i].pfn, *(uintptr_t *)(uintptr_t)(i << PAGESHIFT));
+            }
+        } else {
+            TracePrintf(0, "vpn %d, valid %d, pfn %d, first byte: %d\n", i, PT[i].valid, PT[i].pfn, *(uintptr_t *)(uintptr_t)(i << PAGESHIFT));
+        }
+    }
+}
+
+void
+addToReadyQ (struct pcb *add) {
+    if (ready_pcb_head == NULL && ready_pcb_tail == NULL) {
+        ready_pcb_head = add;
+        ready_pcb_tail = add;
+    } else if (ready_pcb_head == NULL || ready_pcb_tail == NULL) {
+        TracePrintf(0, "addToReadyQ: YOU IDIOT you messed up bookeeping for head and tail\n");
+        Halt();
+    } else {
+        ready_pcb_tail->next = add;
+        ready_pcb_tail = add;
+    }
+}
+
+struct pcb *
+popFromReadyQ() {
+    if (ready_pcb_head == NULL && ready_pcb_tail == NULL) {
+        TracePrintf(0, "popFromReadyQ: nothing in Q\n");
+        return NULL;
+    } else if (ready_pcb_head == NULL || ready_pcb_tail == NULL) {
+        TracePrintf(0, "addToReadyQ: YOU IDIOT you messed up bookeeping for head and tail\n");
+        Halt();
+    } else if (ready_pcb_head == ready_pcb_tail) {
+        struct pcb *ret = ready_pcb_head;
+        ready_pcb_tail = NULL;
+        ready_pcb_head = NULL;
+        return ret;
+    } else {
+        struct pcb *ret = ready_pcb_head;
+        ready_pcb_head = ready_pcb_head->next;
+        return ret;
+    }
+}
