@@ -237,13 +237,11 @@ void TRAP_CLOCK_handler(ExceptionInfo *info)
                 TracePrintf(0, "processTickCount is >= 2, contextSwitch from process %d to process: %d\n", active_pcb->pid, ready_pcb_head->pid);
             }
             struct pcb *switchFrom;
+            switchFrom = active_pcb;
             if (active_pcb->pid != 0) {
                 ready_pcb_tail->next = active_pcb; // set the next of the original tail
                 ready_pcb_tail = active_pcb; // set the tail pointer
-                switchFrom = ready_pcb_tail;
-            } else {
-                switchFrom = idle_pcb;
-            }
+            } 
             active_pcb = ready_pcb_head; // set new active pcb
             if (ready_pcb_head->next == NULL) {
                 ready_pcb_tail = NULL;
@@ -487,6 +485,7 @@ mySwitchFuncFork(SavedContext *ctxp, void *p1, void *p2) {
 
     // PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH 
     // return as ctxp
+    processTickCount = 0;
     return child->ctx;
 }
     
@@ -511,6 +510,7 @@ void yalnix_exit(int status) {
     TracePrintf(0, "In yalnix_exit\n");
     // if process has a parent (that is still running- check if parent is NULL), handle the exit structure
     // malloc an exited_child struct and update the fields
+    
     if (active_pcb->parent != NULL) {
         struct exitedChild *eChild = malloc(sizeof(struct exitedChild));
         eChild->pid = active_pcb->pid;
@@ -586,12 +586,12 @@ void yalnix_exit(int status) {
     // } else { // otherwise, set ptNode valid to valid
         thisNode->valid[active_pcb->ptNodeIdx] = 0;
     //}
-    // update numProcesses (down), numSlots (up)
+    // update numProcesses (below), numSlots (above)
     numProcesses -= 1;
     
     // NEED TODO? free any internal fields that were malloced NEED TODO?
     // free PCB:
-    free(active_pcb);
+    //free(active_pcb);
     
     // if this was last process (nothing in ready or blocked)
         // also free idle
@@ -619,6 +619,7 @@ void yalnix_exit(int status) {
         struct pcb *prev_pcb = active_pcb;
         active_pcb = next_pcb;
         if (active_pcb->ctx == NULL) {
+            TracePrintf(0, "active_pcb->ctx was null\n");
             active_pcb->ctx = malloc(sizeof(SavedContext));
         }
         //TracePrintf(0, "CHILD CTX: %d\n", (uintptr_t)active_pcb->ctx);
@@ -764,7 +765,7 @@ int yalnix_brk(uintptr_t addr) {
 }
 
 int yalnix_delay(int clock_ticks) {
-    TracePrintf(0, "In yalnix_delay: %d ticks\n", clock_ticks);
+    TracePrintf(0, "In yalnix_delay for %d: %d ticks\n", active_pcb->pid, clock_ticks);
     printCurrentState();
     if (clock_ticks > 0) {
         active_pcb->delay = clock_ticks;
@@ -919,7 +920,7 @@ MySwitchFuncNormal(SavedContext *ctxp, void *p1, void *p2) {
     // pageTable1[PAGE_TABLE_LEN - 1].kprot = svdPTE.kprot;
     // pageTable1[PAGE_TABLE_LEN - 1].valid = svdPTE.valid;
     // pageTable1[PAGE_TABLE_LEN - 1].pfn = svdPTE.pfn;
-
+    TracePrintf(0, "pcb1 (%d) ->ctx: %d, pcb2 (%d) ->ctx: %d\n", pcb1->pid, (uintptr_t) pcb1->ctx, pcb2->pid, (uintptr_t) pcb2->ctx);
     WriteRegister(REG_PTR0, (RCS421RegVal) pcb2->ptNode->addr[pcb2->ptNodeIdx]);
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
     TracePrintf(0, "Returning from MySwitchFuncNormal..\n");
@@ -1586,12 +1587,12 @@ LoadProgram(char *name, char **args, ExceptionInfo *info, struct pcb *loadPcb)
 void
 printCurrentState() {
     TracePrintf(0, "-- Printing current State --\n");
-    TracePrintf(0, "Active pcb: %d\n", active_pcb->pid);
+    TracePrintf(0, "Active pcb: %d %d\n", active_pcb->pid, (uintptr_t) active_pcb->ctx);
     if (ready_pcb_head) {
         struct pcb *currPCB = ready_pcb_head;
         TracePrintf(0, "Ready Queue:\n");
         while (currPCB) {
-            TracePrintf(0, "Ready pcb: %d -> \n", currPCB->pid);
+            TracePrintf(0, "Ready pcb: %d %d -> \n", currPCB->pid, (uintptr_t) currPCB->ctx);
             currPCB = currPCB->next;
         }
     } else {
@@ -1602,7 +1603,7 @@ printCurrentState() {
         struct pcb *currPCB = next_delay_pcb;
         TracePrintf(0, "Delay list:\n");
         while (currPCB) {
-            TracePrintf(0, "Delayed pcb: %d -> \n", currPCB->pid);
+            TracePrintf(0, "Delayed pcb: %d %d -> \n", currPCB->pid, (uintptr_t) currPCB->ctx);
             currPCB = currPCB->next;
         }
     } else {
@@ -1613,7 +1614,7 @@ printCurrentState() {
         struct pcb *currPCB = next_delay_pcb;
         TracePrintf(0, "Wait list:\n");
         while (currPCB) {
-            TracePrintf(0, "Waiting pcb: %d -> \n", currPCB->pid);
+            TracePrintf(0, "Waiting pcb: %d %d -> \n", currPCB->pid, (uintptr_t) currPCB->ctx);
             currPCB = currPCB->next;
         }
     } else {
