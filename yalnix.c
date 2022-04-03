@@ -111,8 +111,8 @@ void free_physical_page(int index);
 
 struct pcb *popFromReadyQ();
 void addToReadyQ (struct pcb *add);
-void addToQ (struct pcb *add, struct pcb *head, struct pcb *tail);
-struct pcb *popFromQ(struct pcb *head, struct pcb *tail);
+void addToQ (struct pcb *add, struct pcb **head, struct pcb **tail);
+struct pcb *popFromQ(struct pcb **head, struct pcb **tail);
 struct pcb *createDefaultPCB();
 
 int LoadProgram(char *name, char **args, ExceptionInfo *info, struct pcb *loadPcb);
@@ -904,11 +904,11 @@ int yalnix_tty_read(int tty_id, void *buf, int len) {
         free(currMessage->message); // free original message char *
         currMessage->message = remMessage;
 
-        struct pcb *movePCB = popFromQ(read_blocked_heads[tty_id], read_blocked_tails[tty_id]);
+        struct pcb *movePCB = popFromQ(&read_blocked_heads[tty_id], &read_blocked_tails[tty_id]);
+        printCurrentState();
         if (movePCB) {
             addToReadyQ(movePCB);
         }
-
         return len;
     }                
                 
@@ -1820,16 +1820,16 @@ addToReadyQ (struct pcb *add) {
 }
 
 void
-addToQ (struct pcb *add, struct pcb *head, struct pcb *tail) {
-    if (head == NULL && tail == NULL) {
-        head = add;
-        tail = add;
-    } else if (head == NULL || tail == NULL) {
+addToQ (struct pcb *add, struct pcb **head, struct pcb **tail) {
+    if (*head == NULL && *tail == NULL) {
+        *head = add;
+        *tail = add;
+    } else if (*head == NULL || *tail == NULL) {
         TracePrintf(0, "addToReadyQ: YOU IDIOT you messed up bookeeping for head and tail\n");
         Halt();
     } else {
-        tail->next = add;
-        tail = add;
+        (*tail)->next = add;
+        *tail = add;
     }
 }
 
@@ -1898,23 +1898,23 @@ popFromReadyQ() {
 }
 
 struct pcb *
-popFromQ(struct pcb *head, struct pcb *tail) {
-    if (head == NULL && tail == NULL) {
+popFromQ(struct pcb **head, struct pcb **tail) {
+    if (*head == NULL && *tail == NULL) {
         TracePrintf(0, "popFromQ: nothing in Q\n");
         return NULL;
-    } else if (head == NULL || tail == NULL) {
+    } else if (*head == NULL || *tail == NULL) {
         TracePrintf(0, "popFromQ: YOU IDIOT you messed up bookeeping for head and tail\n");
         Halt();
     } else if (head == tail) {
         TracePrintf(0, "popFromQ: head == tail\n");
-        struct pcb *ret = head;
-        tail = NULL;
-        head = NULL;
+        struct pcb *ret = *head;
+        *tail = NULL;
+        *head = NULL;
         return ret;
     } else {
-        TracePrintf(0, "popFromQ: length is larger than 1\n");
-        struct pcb *ret = head;
-        head = head->next;
+        TracePrintf(0, "popFromQ: length is larger than 1, head: %d tail: %d\n", (*head)->pid, (*tail)->pid);
+        struct pcb *ret = *head;
+        *head = (*head)->next;
         ret->next = NULL;
         return ret;
     }
