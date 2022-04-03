@@ -29,6 +29,12 @@ struct activeChild {
     struct activeChild *next;
 };
 
+struct ttyMessageReceive {
+    struct ttyMessageReceive *next;
+    char *message;
+    int length;
+};
+
 struct pcb {
     int pid;
     SavedContext *ctx;
@@ -63,6 +69,8 @@ struct pcb *ready_pcb_tail = NULL;
 struct pcb *blocked_pcb;  // one for each reason?
 struct pcb *next_delay_pcb = NULL;
 struct pcb *wait_pcb_head = NULL;
+struct pcb *read_blocked_heads[NUM_TERMINALS];
+struct pcb *read_blocked_tails[NUM_TERMINALS];
 struct pcb *idle_pcb;
 
 struct ptNode *startptNode;
@@ -71,6 +79,9 @@ int numSlots; // number of slots total
 int numReadyProcesses = 0;
 int processTickCount = 0;
 uintptr_t nextVAforPageTable = VMEM_1_LIMIT - PAGESIZE * 2;
+
+struct ttyMessageReceive *ttyReceiveHeads[NUM_TERMINALS];
+struct ttyMessageReceive *ttyReceiveTails[NUM_TERMINALS];
 
 int countargs;
 
@@ -91,7 +102,7 @@ int yalnix_wait(int *status_ptr);
 int yalnix_getpid();
 int yalnix_brk(uintptr_t addr);
 int yalnix_delay(int clock_ticks);
-int yalnix_tty_read();
+int yalnix_tty_read(int tty_id, void *buf, int len);
 int yalnix_tty_write();
 
 void idle_process();
@@ -100,11 +111,13 @@ void free_physical_page(int index);
 
 struct pcb *popFromReadyQ();
 void addToReadyQ (struct pcb *add);
+void addToQ (struct pcb *add, struct pcb *head, struct pcb *tail);
+struct pcb *popFromQ(struct pcb *head, struct pcb *tail);
 struct pcb *createDefaultPCB();
 
 int LoadProgram(char *name, char **args, ExceptionInfo *info, struct pcb *loadPcb);
-SavedContext *MySwitchFuncNormal(SavedContext *ctxp, void *p1, void *p2);
-SavedContext *MySwitchFuncIdleInit(SavedContext *ctxp, void *p1, void *p2);
+SavedContext *mySwitchFuncNormal(SavedContext *ctxp, void *p1, void *p2);
+SavedContext *mySwitchFuncIdleInit(SavedContext *ctxp, void *p1, void *p2);
 SavedContext *mySwitchFuncFork(SavedContext *ctxp, void *p1, void *p2);
 
 void printPT(struct pte *PT, int printValid);
@@ -143,7 +156,7 @@ createDefaultPCB() {
 void TRAP_KERNEL_handler(ExceptionInfo *info)
 {
     TracePrintf(0, "\n\nIn TRAP_KERNEL_handler\n");
-    
+    printCurrentState();
     int result;
     int code = info->code;
     
@@ -164,7 +177,7 @@ void TRAP_KERNEL_handler(ExceptionInfo *info)
     } else if (code == YALNIX_DELAY) {
         result = yalnix_delay((int) info->regs[1]);
     } else if (code == YALNIX_TTY_READ) {
-        result = yalnix_tty_read();
+        result = yalnix_tty_read((int) info->regs[1], (void *) info->regs[2], (int) info->regs[3]);
     } else if (code == YALNIX_TTY_WRITE) {
         result = yalnix_tty_write();
     }  // if code not defined then not good
@@ -251,7 +264,7 @@ void TRAP_CLOCK_handler(ExceptionInfo *info)
 
             // context switch from the original process (which is now in ready_pcb_tail) to the ready process next in line (which is now active_pcb)
             TracePrintf(0, "Switching from %d to %d\n", switchFrom->pid, active_pcb->pid);
-            ContextSwitch(MySwitchFuncNormal, switchFrom->ctx, switchFrom, active_pcb);
+            ContextSwitch(mySwitchFuncNormal, switchFrom->ctx, switchFrom, active_pcb);
         }
     } else if (processTickCount < 2) {
         processTickCount++;
@@ -261,14 +274,14 @@ void TRAP_CLOCK_handler(ExceptionInfo *info)
 
 void TRAP_ILLEGAL_handler(ExceptionInfo *info)
 {
-    TracePrintf(0, "In TRAP_ILLEGAL_handler\n");
+    TracePrintf(0, "\n\nIn TRAP_ILLEGAL_handler\n");
     Halt();
     (void) info;
 }
 
 void TRAP_MEMORY_handler(ExceptionInfo *info)
 {
-    TracePrintf(0, "In TRAP_MEMORY_handler with addr: %d %d %d %d %d %d\n", (uintptr_t) info->addr, (uintptr_t) info->code, SEGV_MAPERR, SEGV_ACCERR, SI_KERNEL, SI_USER);
+    TracePrintf(0, "\n\nIn TRAP_MEMORY_handler with addr: %d %d %d %d %d %d\n", (uintptr_t) info->addr, (uintptr_t) info->code, SEGV_MAPERR, SEGV_ACCERR, SI_KERNEL, SI_USER);
     // if address is below the user stack and above the brk + 1 page, then
     if (info->addr < active_pcb->stackAddr && info->addr > active_pcb->brkAddr) {
         // grow the user stack to cover the address
@@ -291,16 +304,51 @@ void TRAP_MEMORY_handler(ExceptionInfo *info)
 
 void TRAP_MATH_handler(ExceptionInfo *info)
 {
-    TracePrintf(0, "In TRAP_MATH_handler\n");
+    TracePrintf(0, "\n\nIn TRAP_MATH_handler\n");
     Halt();
     (void) info;
 }
 
 void TRAP_TTY_RECEIVE_handler(ExceptionInfo *info)
 {
-    TracePrintf(0, "In TRAP_TTY_RECEIVE_handler\n");
-    Halt();
-    (void) info;
+    TracePrintf(0, "\n\nIn TRAP_TTY_RECEIVE_handler\n");
+    int messageLen;
+    int ttyNum = info->code;
+
+    struct ttyMessageReceive *newMessage = malloc(sizeof(struct ttyMessageReceive));
+    char tempMessage[TERMINAL_MAX_LINE];
+
+    messageLen = TtyReceive(ttyNum, (void *) tempMessage, TERMINAL_MAX_LINE);
+
+    char *actualMessage = malloc(sizeof(char) * messageLen);
+
+    // memcpy message into the malloced address
+    memcpy((void *) actualMessage, (void *) tempMessage, messageLen);
+
+    // set address in the struct thing we make to the malloced address
+    newMessage->message = actualMessage;
+
+    newMessage->length = messageLen;
+    newMessage->next = NULL;
+
+    if (ttyReceiveTails[ttyNum]) { // if not empty
+        // tail's next = this one 
+        ttyReceiveTails[ttyNum]->next = newMessage;
+    } else {
+        ttyReceiveHeads[ttyNum] = newMessage;
+    }
+    // tail = this one
+    ttyReceiveTails[ttyNum] = newMessage;
+
+    if (read_blocked_heads[ttyNum]) {
+        struct pcb *savedPCB = read_blocked_heads[ttyNum];
+        read_blocked_heads[ttyNum] = read_blocked_heads[ttyNum]->next;
+        if (!read_blocked_heads[ttyNum]) {
+            read_blocked_tails[ttyNum] = NULL;
+        }
+        savedPCB->next = NULL;
+        addToReadyQ(savedPCB);
+    }
 }
 
 void TRAP_TRANSMIT_handler(ExceptionInfo *info)
@@ -514,7 +562,7 @@ void yalnix_exec(ExceptionInfo *info, char *filename, char **argvec) {
  when exits for last process (or last terminated by kernel), execute Halt
  */
 void yalnix_exit(int status) {
-    TracePrintf(0, "In yalnix_exit\n");
+    TracePrintf(0, "In yalnix_exit, %d should die\n", active_pcb->pid);
     // if process has a parent (that is still running- check if parent is NULL), handle the exit structure
     // malloc an exited_child struct and update the fields
     
@@ -603,20 +651,28 @@ void yalnix_exit(int status) {
     // if this was last process (nothing in ready or blocked)
         // also free idle
         // Halt();
+    bool die = true;
     if (ready_pcb_head == NULL && ready_pcb_tail == NULL) {
-        if (next_delay_pcb == NULL && wait_pcb_head == NULL) {
+        TracePrintf(0, "Nothing is ready\n");
+        for (i = 0; i < NUM_TERMINALS; i++) {
+            if (read_blocked_heads[i]) {
+                die = false;
+            }
+        }
+        if (next_delay_pcb == NULL && wait_pcb_head == NULL && die) {
             TracePrintf(0, "No ready, no delayed processes. Bye Bye!\n");
             // NEED TODO? free idle
             Halt();
         } else { // nothing ready but something delayed, so switch to idle
             struct pcb *oldPCB = active_pcb;
             active_pcb = idle_pcb;
-            ContextSwitch(MySwitchFuncNormal, oldPCB->ctx, oldPCB, active_pcb); // the middle two arguments don't really matter here, we don't want to save ctx anyway
+            ContextSwitch(mySwitchFuncNormal, oldPCB->ctx, oldPCB, active_pcb); // the middle two arguments don't really matter here, we don't want to save ctx anyway
         }
     } else if (ready_pcb_head == NULL || ready_pcb_tail == NULL) {
         TracePrintf(0, "yalnix_exit: IDIOTIC BOOKKEEPING\n");
         Halt();
     } else {
+        TracePrintf(0, "Something is ready\n");
         struct pcb *next_pcb = popFromReadyQ();
         if (next_pcb == NULL) {
             TracePrintf(0, "yalnix_exit: something's wrong (null case already taken care of above)\n");
@@ -630,11 +686,11 @@ void yalnix_exit(int status) {
             active_pcb->ctx = malloc(sizeof(SavedContext));
         }
         //TracePrintf(0, "CHILD CTX: %d\n", (uintptr_t)active_pcb->ctx);
-        ContextSwitch(MySwitchFuncNormal, prev_pcb->ctx, prev_pcb, active_pcb); // the middle two arguments don't really matter here, we don't want to save ctx anyway
+        ContextSwitch(mySwitchFuncNormal, prev_pcb->ctx, prev_pcb, active_pcb); // the middle two arguments don't really matter here, we don't want to save ctx anyway
     }
     
     // set a new active_pcb and context switch to it? (or handle active_pcb is null elsewhere)
-    TracePrintf(0, "yalnix_exit: we... shouldn't get here");
+    TracePrintf(0, "yalnix_exit: we... shouldn't get here, pid: %d\n", active_pcb->pid);
     Halt();
 }
 
@@ -670,7 +726,7 @@ int yalnix_wait(int *status_ptr) {
         } else {
             active_pcb = next_pcb;
         }
-        ContextSwitch(MySwitchFuncNormal, old_pcb->ctx, old_pcb, active_pcb);
+        ContextSwitch(mySwitchFuncNormal, old_pcb->ctx, old_pcb, active_pcb);
         TracePrintf(0, "yalnix_wait: switched to process %d\n", active_pcb->pid);
     }
 
@@ -791,16 +847,73 @@ int yalnix_delay(int clock_ticks) {
             active_pcb = idle_pcb;
         }
         TracePrintf(0, "Switching from %d to %d\n", prev_pcb->pid, active_pcb->pid);
-        ContextSwitch(MySwitchFuncNormal, prev_pcb->ctx, prev_pcb, active_pcb);
+        ContextSwitch(mySwitchFuncNormal, prev_pcb->ctx, prev_pcb, active_pcb);
     } else if (clock_ticks < 0) {
         return ERROR;
     }
     return 0;
 }
 
-int yalnix_tty_read() {
+/*
+
+Create block queues
+
+** set both to null in kernelstart;
+
+*/
+
+int yalnix_tty_read(int tty_id, void *buf, int len) {
     TracePrintf(0, "In yalnix_tty_read\n");
-    Halt();
+    // check if there is something in ttyReceiveHeads
+    if (!ttyReceiveHeads[tty_id]) { // if not, add to block queue
+        if (!read_blocked_heads[tty_id]) { // if blocked queue (index with tty_id) is empty,
+            read_blocked_heads[tty_id] = active_pcb; // set head
+        } else { // if not empty,
+            read_blocked_tails[tty_id]->next = active_pcb; // set tail's next
+        }
+        read_blocked_tails[tty_id] = active_pcb; // set tail
+        active_pcb->next = NULL;
+
+        struct pcb *next_pcb = popFromReadyQ();
+        struct pcb *old_pcb = active_pcb;
+        if (!next_pcb) { // if ready queue is empty,
+            active_pcb = idle_pcb; // context switch to idle
+        } else {
+            active_pcb = next_pcb; // set active_pcb to next process in ready queue
+        }
+        ContextSwitch(mySwitchFuncNormal, old_pcb->ctx, old_pcb, active_pcb);
+    }
+    
+    struct ttyMessageReceive *currMessage = ttyReceiveHeads[tty_id];
+    // now read line out of message struct thing
+    if (len >= currMessage->length) { // if len is greater than or equal to the head message's length,
+        memcpy(buf, (void *)currMessage->message, currMessage->length); // then memcpy the entire message into buf, 
+        ttyReceiveHeads[tty_id] = ttyReceiveHeads[tty_id]->next; // update head of queue
+        if (!ttyReceiveHeads[tty_id]) {
+            ttyReceiveTails[tty_id] = NULL;
+        }
+        int retLen = currMessage->length;
+        free(currMessage->message); // FREE EVERYTHING
+        free(currMessage);
+        return retLen; // and return the message's length
+    } else {
+        memcpy(buf, (void *)currMessage->message, len); // then memcpy only len bytes into buf,
+        char *remMessage = malloc(currMessage->length - len); // malloc another char* for the remaining message
+        memcpy((void *) remMessage, (void *) &currMessage->message[len], currMessage->length - len); // memcpy remaining message into malloced pointer,
+        currMessage->length = currMessage->length - len; 
+        free(currMessage->message); // free original message char *
+        currMessage->message = remMessage;
+
+        struct pcb *movePCB = popFromQ(read_blocked_heads[tty_id], read_blocked_tails[tty_id]);
+        if (movePCB) {
+            addToReadyQ(movePCB);
+        }
+
+        return len;
+    }                
+                
+                
+                
 }
 
 int yalnix_tty_write() {
@@ -855,7 +968,7 @@ SetKernelBrk(void *addr)
 
 
 SavedContext *
-MySwitchFuncIdleInit(SavedContext *ctxp, void *p1, void *p2) {
+mySwitchFuncIdleInit(SavedContext *ctxp, void *p1, void *p2) {
     struct pcb *pcb1 = (struct pcb *) p1;
     (void)pcb1;
     struct pcb *pcb2 = (struct pcb *) p2;
@@ -897,7 +1010,7 @@ MySwitchFuncIdleInit(SavedContext *ctxp, void *p1, void *p2) {
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
     //memcpy((void*) pcb2->ctx, (void*) pcb1->ctx, sizeof(SavedContext));
     //pcb2->ctx = ctxp;
-    TracePrintf(0, "Returning from myswitchfuncIdleInit..\n");
+    TracePrintf(0, "Returning from mySwitchFuncIdleInit..\n");
     active_pcb = pcb2;
     processTickCount = 0;
     //return ctxp;
@@ -906,7 +1019,7 @@ MySwitchFuncIdleInit(SavedContext *ctxp, void *p1, void *p2) {
 }
 
 SavedContext *
-MySwitchFuncNormal(SavedContext *ctxp, void *p1, void *p2) {
+mySwitchFuncNormal(SavedContext *ctxp, void *p1, void *p2) {
     TracePrintf(0, "In mySwitchFuncNormal\n");
     struct pcb *pcb1 = (struct pcb *) p1;
     (void)pcb1;
@@ -930,7 +1043,7 @@ MySwitchFuncNormal(SavedContext *ctxp, void *p1, void *p2) {
     TracePrintf(0, "pcb1 (%d) ->ctx: %d, pcb2 (%d) ->ctx: %d\n", pcb1->pid, (uintptr_t) pcb1->ctx, pcb2->pid, (uintptr_t) pcb2->ctx);
     WriteRegister(REG_PTR0, (RCS421RegVal) pcb2->ptNode->addr[pcb2->ptNodeIdx]);
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
-    TracePrintf(0, "Returning from MySwitchFuncNormal..\n");
+    TracePrintf(0, "Returning from mySwitchFuncNormal..\n");
     processTickCount = 0;
     return pcb2->ctx;
 }
@@ -1141,7 +1254,12 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     // Can be loaded from a file using LoadProgram, or have it "built into" the rest of the code
         // initialize the pc value for this idle process to the address of the code for idle
 
-
+    for (i = 0; i < NUM_TERMINALS; i++) {
+        ttyReceiveHeads[i] = NULL;
+        ttyReceiveTails[i] = NULL;
+        read_blocked_heads[i] = NULL;
+        read_blocked_tails[i] = NULL;
+    }
     
     // loadprogram for idle
 
@@ -1160,7 +1278,7 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     TracePrintf(0, "Starting contextswitch...\n");
     //ContextSwitch(DumbMySwitchFunc, init_pcb->ctx, init_pcb, init_pcb);
     //TracePrintf(0, "Finished first contextSwitch\n");
-    ContextSwitch(MySwitchFuncIdleInit, active_pcb->ctx, active_pcb, init_pcb);
+    ContextSwitch(mySwitchFuncIdleInit, active_pcb->ctx, active_pcb, init_pcb);
     //Halt();
     TracePrintf(0, "regptr0: %d, regidle: %d, reginit: %d\n", (uintptr_t) ReadRegister(REG_PTR0), idle_pcb->ptNode->addr[idle_pcb->ptNodeIdx], init_pcb->ptNode->addr[init_pcb->ptNodeIdx]);
     if (initLoaded) {
@@ -1645,7 +1763,7 @@ printCurrentState() {
     }
 
     if (wait_pcb_head) {
-        struct pcb *currPCB = next_delay_pcb;
+        struct pcb *currPCB = wait_pcb_head;
         TracePrintf(0, "Wait list:\n");
         while (currPCB) {
             TracePrintf(0, "Waiting pcb: %d %d -> \n", currPCB->pid, (uintptr_t) currPCB->ctx);
@@ -1653,6 +1771,17 @@ printCurrentState() {
         }
     } else {
         TracePrintf(0, "Waiting list Empty\n");
+    }
+    int i;
+    for (i = 0; i < NUM_TERMINALS; i++) {
+        if (read_blocked_heads[i]) {
+            struct pcb *currPCB = read_blocked_heads[i];
+            TracePrintf(0, "Read Blocked %d:\n", i);
+            while (currPCB) {
+                TracePrintf(0, "read blocked pcb %d: %d %d -> \n", i, currPCB->pid, (uintptr_t) currPCB->ctx);
+                currPCB = currPCB->next;
+            }
+        }
     }
     TracePrintf(0, "-- End printing current state-- \n");
 }
@@ -1687,6 +1816,20 @@ addToReadyQ (struct pcb *add) {
     } else {
         ready_pcb_tail->next = add;
         ready_pcb_tail = add;
+    }
+}
+
+void
+addToQ (struct pcb *add, struct pcb *head, struct pcb *tail) {
+    if (head == NULL && tail == NULL) {
+        head = add;
+        tail = add;
+    } else if (head == NULL || tail == NULL) {
+        TracePrintf(0, "addToReadyQ: YOU IDIOT you messed up bookeeping for head and tail\n");
+        Halt();
+    } else {
+        tail->next = add;
+        tail = add;
     }
 }
 
@@ -1739,7 +1882,7 @@ popFromReadyQ() {
         TracePrintf(0, "popFromReadyQ: nothing in Q\n");
         return NULL;
     } else if (ready_pcb_head == NULL || ready_pcb_tail == NULL) {
-        TracePrintf(0, "addToReadyQ: YOU IDIOT you messed up bookeeping for head and tail\n");
+        TracePrintf(0, "popFromReadyQ: YOU IDIOT you messed up bookeeping for head and tail\n");
         Halt();
     } else if (ready_pcb_head == ready_pcb_tail) {
         struct pcb *ret = ready_pcb_head;
@@ -1749,6 +1892,31 @@ popFromReadyQ() {
     } else {
         struct pcb *ret = ready_pcb_head;
         ready_pcb_head = ready_pcb_head->next;
+        ret->next = NULL;
         return ret;
     }
 }
+
+struct pcb *
+popFromQ(struct pcb *head, struct pcb *tail) {
+    if (head == NULL && tail == NULL) {
+        TracePrintf(0, "popFromQ: nothing in Q\n");
+        return NULL;
+    } else if (head == NULL || tail == NULL) {
+        TracePrintf(0, "popFromQ: YOU IDIOT you messed up bookeeping for head and tail\n");
+        Halt();
+    } else if (head == tail) {
+        TracePrintf(0, "popFromQ: head == tail\n");
+        struct pcb *ret = head;
+        tail = NULL;
+        head = NULL;
+        return ret;
+    } else {
+        TracePrintf(0, "popFromQ: length is larger than 1\n");
+        struct pcb *ret = head;
+        head = head->next;
+        ret->next = NULL;
+        return ret;
+    }
+}
+
