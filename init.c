@@ -37,7 +37,7 @@ int main()
         //Delay(2);
     } else {
         
-        //Delay(5);
+        Delay(5);
     }
 
     
@@ -47,9 +47,12 @@ int main()
     printf("%d returned from fork2 with return: %d %d\n", GetPid(), ret, ret2);
     int ret3 = Fork();
     printf("%d returned from fork3 with return: %d %d %d\n", GetPid(), ret, ret2, ret3);
-    //int ret4 = Fork();
-    //printf("%d returned from fork4 with return: %d %d %d %d\n", GetPid() ret, ret2, ret3, ret4);
-    //Exec("testExec", &idle_args[0]);
+    int ret4 = Fork();
+    printf("%d returned from fork4 with return: %d %d %d %d\n", GetPid(), ret, ret2, ret3, ret4);
+    Exec("testExec", &idle_args[0]);
     (void)idle_args;
+    // (void)ret;
+    // (void)ret2;
+    // (void)ret3;
     return 0;
 }

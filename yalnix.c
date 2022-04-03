@@ -345,14 +345,17 @@ int yalnix_fork() {
         if (currPTNode->valid[0] == 0) {
             childPCB->PT0 = (struct pte *) currPTNode->VA[0];
             childPCB->ptNodeIdx = 0;
+            currPTNode->valid[0] = 1;
         } else if (currPTNode->valid[1] == 0) {
             childPCB->PT0 = (struct pte *) currPTNode->VA[1];
             childPCB->ptNodeIdx = 1;
+            currPTNode->valid[1] = 1;
         } else {
             TracePrintf(0, "Fork: VERY BAD: no empty slot!!\n");
             Halt();
         }
         childPCB->ptNode = currPTNode;
+        TracePrintf(0, "YOYO in if: parent PT0 is at: %d, child's is at: %d (VA), pid: %d %d\n", active_pcb->PT0, childPCB->PT0, active_pcb->pid, childPCB->pid);
     } else if (numSlots == numProcesses) { // if there are no slots left
         TracePrintf(0, "yalnix_fork: There are no slots left\n");
         struct ptNode *newNode = malloc(sizeof(struct ptNode));
@@ -377,7 +380,9 @@ int yalnix_fork() {
         childPCB->PT0 = (struct pte *) newNode->VA[0];
         childPCB->ptNode = newNode;
         childPCB->ptNodeIdx = 0;
+        TracePrintf(0, "YOYO in else: parent PT0 is at: %d, child's is at: %d (VA)\n", active_pcb->PT0, childPCB->PT0);
     }
+    
     numProcesses += 1;
     TracePrintf(0, "yalnix_fork: page table allocated\n");
     childPCB->brkAddr = active_pcb->brkAddr;
@@ -434,9 +439,10 @@ int yalnix_fork() {
 
 SavedContext *
 mySwitchFuncFork(SavedContext *ctxp, void *p1, void *p2) {
-    TracePrintf(0, "In mySwitchFuncFork\n");
     struct pcb *parent = (struct pcb *)p1;
     struct pcb *child = (struct pcb *)p2;
+    TracePrintf(0, "In mySwitchFuncFork trying to switch from %d -> %d\n", parent->pid, child->pid);
+    TracePrintf(0, "In beginning: parent PT0 is at: %d, child's is at: %d (VA)\n", parent->PT0, child->PT0);
     uintptr_t i;
     //child->ctx = malloc(sizeof(SavedContext));
     //memcpy((void *)child->ctx, (void *)ctxp, sizeof(SavedContext));
@@ -467,6 +473,7 @@ mySwitchFuncFork(SavedContext *ctxp, void *p1, void *p2) {
 
             pageTable1[borrowpfn].pfn = child->PT0[i].pfn;
             memcpy((void *)(borrowedAddrVA), (void *) (i << PAGESHIFT), PAGESIZE);
+            TracePrintf(0, "parent PT0 is at: %d, child's is at: %d (VA)\n", parent->PT0, child->PT0);
             TracePrintf(0, "copied from %d to %d, index %d, VA %d to %d\n", parent->PT0[i].pfn, child->PT0[i].pfn, i, i << PAGESHIFT, borrowedAddrVA);
             WriteRegister(REG_TLB_FLUSH, (RCS421RegVal)borrowedAddrVA); // flush borrowed pte
         } else { // if it's not, assign 0 to valid bit
@@ -1188,6 +1195,7 @@ int get_free_page() {
     WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) (VMEM_1_LIMIT - PAGESIZE));
     int ret = svdPage >> PAGESHIFT;
 //    TracePrintf(0, "getFreePage returns pfn: %d\n", ret);
+    TracePrintf(0, "get_free_page - returning page: %d\n", ret);
     return ret;
 }
 
@@ -1655,6 +1663,49 @@ addToReadyQ (struct pcb *add) {
         ready_pcb_tail = add;
     }
 }
+
+// void
+// validateFreePages() {
+//     int i;
+//     struct pte svdPTE;
+//     svdPTE.kprot = pageTable1[PAGE_TABLE_LEN - 1].kprot;
+//     svdPTE.pfn = pageTable1[PAGE_TABLE_LEN - 1].pfn;
+//     svdPTE.valid = pageTable1[PAGE_TABLE_LEN - 1].valid;
+    
+//     char printThis[] = 
+
+//     uintptr_t currPage = nextFreePage;
+//     pageTable1[PAGE_TABLE_LEN - 1].kprot = PROT_READ | PROT_WRITE;
+
+//     for (i = 0; i < freePages, i++) {
+//         pageTable1[PAGE_TABLE_LEN - 1].valid = 1;
+//         pageTable1[PAGE_TABLE_LEN - 1].pfn = currPage >> PAGESHIFT;
+//     }
+
+//     uintptr_t svdPage = nextFreePage;
+// //    TracePrintf(0, "initial nextFreePage %d\n", nextFreePage);
+//     //2. Go to PTE indexed by PAGE_TABLE_LEN - 1
+//         // and save values of the PTE first,
+//         // plug in nextFreePage >> PAGESHIFT in pfn field
+    
+//     pageTable1[PAGE_TABLE_LEN - 1].valid = 1;
+//     pageTable1[PAGE_TABLE_LEN - 1].pfn = nextFreePage >> PAGESHIFT;
+//     pageTable1[PAGE_TABLE_LEN - 1].kprot = PROT_READ | PROT_WRITE;
+    
+//     //3. access VMEM_1_LIMIT - PAGESIZE and set nextFreePage to be that
+//     nextFreePage = *((uintptr_t *) (VMEM_1_LIMIT - PAGESIZE));
+// //    TracePrintf(0, "new nextFreePage %d\n", nextFreePage);
+//     //4. decrease freePage by 1
+//     freePages -= 1;
+    
+//     //5. restore PTE
+//     pageTable1[PAGE_TABLE_LEN - 1].kprot = svdPTE.kprot;
+//     pageTable1[PAGE_TABLE_LEN - 1].valid = svdPTE.valid;
+//     pageTable1[PAGE_TABLE_LEN - 1].pfn = svdPTE.pfn;
+    
+//     //6. Flush from TLB
+//     WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) (VMEM_1_LIMIT - PAGESIZE));
+// }
 
 struct pcb *
 popFromReadyQ() {
