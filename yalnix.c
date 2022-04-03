@@ -103,7 +103,7 @@ void addToReadyQ (struct pcb *add);
 struct pcb *createDefaultPCB();
 
 int LoadProgram(char *name, char **args, ExceptionInfo *info, struct pcb *loadPcb);
-SavedContext *MySwitchFuncNormal(SavedContext *ctxp, void *p1, void *p2); 
+SavedContext *MySwitchFuncNormal(SavedContext *ctxp, void *p1, void *p2);
 SavedContext *MySwitchFuncIdleInit(SavedContext *ctxp, void *p1, void *p2);
 SavedContext *mySwitchFuncFork(SavedContext *ctxp, void *p1, void *p2);
 
@@ -241,7 +241,7 @@ void TRAP_CLOCK_handler(ExceptionInfo *info)
             if (active_pcb->pid != 0) {
                 ready_pcb_tail->next = active_pcb; // set the next of the original tail
                 ready_pcb_tail = active_pcb; // set the tail pointer
-            } 
+            }
             active_pcb = ready_pcb_head; // set new active pcb
             if (ready_pcb_head->next == NULL) {
                 ready_pcb_tail = NULL;
@@ -251,7 +251,7 @@ void TRAP_CLOCK_handler(ExceptionInfo *info)
 
             // context switch from the original process (which is now in ready_pcb_tail) to the ready process next in line (which is now active_pcb)
             TracePrintf(0, "Switching from %d to %d\n", switchFrom->pid, active_pcb->pid);
-            ContextSwitch(MySwitchFuncNormal, switchFrom->ctx, switchFrom, active_pcb); 
+            ContextSwitch(MySwitchFuncNormal, switchFrom->ctx, switchFrom, active_pcb);
         }
     } else if (processTickCount < 2) {
         processTickCount++;
@@ -490,7 +490,7 @@ mySwitchFuncFork(SavedContext *ctxp, void *p1, void *p2) {
     WriteRegister(REG_PTR0, child->ptNode->addr[child->ptNodeIdx]);
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
 
-    // PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH 
+    // PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH PLEASE FLUSH
     // return as ctxp
     processTickCount = 0;
     return child->ctx;
@@ -748,7 +748,7 @@ int yalnix_brk(uintptr_t addr) {
     // If they're the same, don't do anything
     if ((uintptr_t) active_pcb->brkAddr == roundedAddr) {
         // don't do anything
-    } else if ((uintptr_t) active_pcb->brkAddr <= roundedAddr) { // If roundedAddr > breakAddr, 
+    } else if ((uintptr_t) active_pcb->brkAddr <= roundedAddr) { // If roundedAddr > breakAddr,
         // then allocate pages and update ptes in pt0, and breakAddr accordingly
         for (i = (uintptr_t) active_pcb->brkAddr >> PAGESHIFT; i < roundedAddr >> PAGESHIFT; i++) {
             active_pcb->PT0[i].valid = 1;
@@ -951,11 +951,11 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     // Remeber: virtual memory is not enabled here
     kernel_brk = orig_brk;
     
-    struct pte *idlePTCheese = malloc(sizeof(struct pte) * PAGE_TABLE_LEN);
-    char *placeHolder = malloc(2024);
-    (void)placeHolder;
-    struct pte *initPTCheese = malloc(sizeof(struct pte) * PAGE_TABLE_LEN);
-    TracePrintf(0, "idlePT: %d, initPT = %d\n", (uintptr_t)idlePTCheese, (uintptr_t)initPTCheese);
+//    struct pte *idlePTCheese = malloc(sizeof(struct pte) * PAGE_TABLE_LEN);
+//    char *placeHolder = malloc(2024);
+//    (void)placeHolder;
+//    struct pte *initPTCheese = malloc(sizeof(struct pte) * PAGE_TABLE_LEN);
+//    TracePrintf(0, "idlePT: %d, initPT = %d\n", (uintptr_t)idlePTCheese, (uintptr_t)initPTCheese);
 
     // Initialize interrupt vector table entries for each type of interrupt, exception, or trap
     //void (*handlers[TRAP_VECTOR_SIZE])(ExceptionInfo*) = calloc(TRAP_VECTOR_SIZE, 4);
@@ -975,24 +975,28 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     TracePrintf(0, "Interrupt vector: %d\n", (int)(uintptr_t) handlers[3]);
     TracePrintf(0, "Interrupt vector: %d\n", (int)(uintptr_t) handlers[4]);
     TracePrintf(0, "Interrupt vector: %d\n", (int)(uintptr_t) TRAP_VECTOR_SIZE);
+    
         
     idle_pcb = malloc(sizeof(struct pcb));
     active_pcb = malloc(sizeof(struct pcb));
     startptNode = malloc(sizeof(struct ptNode));
     idle_pcb->ctx = malloc(sizeof(SavedContext));
     active_pcb->ctx = malloc(sizeof(SavedContext));
-    startptNode->addr[0] = (uintptr_t) idlePTCheese;
-    startptNode->addr[1] = (uintptr_t) initPTCheese;
+    startptNode->addr[0] = (uintptr_t) nextVAforPageTable;
+    startptNode->addr[1] = (uintptr_t) nextVAforPageTable + PAGESIZE/2;;
     startptNode->valid[0] = 1;
     startptNode->valid[1] = 1;
-    startptNode->VA[0] = (uintptr_t) idlePTCheese;
-    startptNode->VA[1] = (uintptr_t) initPTCheese;
+    startptNode->VA[0] = (uintptr_t) nextVAforPageTable;
+    startptNode->VA[1] = (uintptr_t) nextVAforPageTable + PAGESIZE/2;;
     startptNode->next = NULL;
     numProcesses = 2;
     numSlots = 2;
-    kernel_brk += PAGESIZE;
+//    kernel_brk += PAGESIZE;
+    nextVAforPageTable -= PAGESIZE;
     //struct pte *pageTable0 = malloc(sizeof(struct pte) * PAGE_TABLE_LEN);  // need to malloc before building page table structures
-
+    TracePrintf(0, "startptNode->addr[0] = %d, page num = %d\n", startptNode->addr[0], startptNode->addr[0] >> PAGESHIFT);
+    
+    
     idle_pcb->next = NULL;
     active_pcb->next = NULL;
     idle_pcb->PT0 = (struct pte *) startptNode->addr[0];
@@ -1011,15 +1015,22 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
         // or a separate structure
         // this list of free page frames should be based on the pmem_size argument passed on to your KernelStart
     nextFreePage = (uintptr_t) MEM_INVALID_SIZE;
+    TracePrintf(0, "start: %d, end: %d\n", nextFreePage, KERNEL_STACK_BASE - PAGESIZE);
     for (nextPage = nextFreePage; nextPage < KERNEL_STACK_BASE - PAGESIZE; nextPage = nextPage + PAGESIZE) {
         *((uintptr_t *) nextPage) = nextPage + PAGESIZE;
         freePages += 1;
     }
     kernelBreak = (uintptr_t) kernel_brk;
     *((uintptr_t *) nextPage) = kernelBreak;
+    TracePrintf(0, "start: %d, end: %d\n", kernelBreak, pmem_size - 2*PAGESIZE);
     for (; kernelBreak < pmem_size - 2*PAGESIZE; kernelBreak = kernelBreak + PAGESIZE) {
-        *((uintptr_t *) kernelBreak) = kernelBreak + PAGESIZE;
-        freePages += 1;
+        if (kernelBreak != startptNode->addr[0]) {
+            *((uintptr_t *) kernelBreak) = kernelBreak + PAGESIZE;
+            freePages += 1;
+        } else {
+            TracePrintf(0, "startptNode->addr[0] skipped\n");
+        }
+        
     }
     
     // be careful not to accidentally end up using the same page of physical memory twice for different uses at the same time
@@ -1093,6 +1104,12 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
         //TracePrintf(0, "YOYO above data bss entry: %d\n", (uintptr_t) &entry);
     }
     
+    int freePagePT1Idx = (startptNode->addr[0] >> PAGESHIFT) - PAGE_TABLE_LEN;
+    pageTable1[freePagePT1Idx].valid = 1;
+    pageTable1[freePagePT1Idx].kprot = PROT_READ | PROT_WRITE;
+    pageTable1[freePagePT1Idx].uprot = PROT_READ | PROT_WRITE;
+    pageTable1[freePagePT1Idx].pfn = startptNode->addr[0] >> PAGESHIFT;
+    
 
     // Initialize registers REG_PTR0 and REG_PTR1 to define these initial page tables
     WriteRegister(REG_PTR0, (RCS421RegVal) &idlePageTable0[0]);
@@ -1109,7 +1126,16 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     vm_enabled = true;
     printPCBInfo(active_pcb);
     printPCBInfo(idle_pcb);
-
+    
+//    TracePrintf(0, "PageTable1: \n");
+//    int p;
+//    for (p = 0; p < PAGE_TABLE_LEN; p++) {
+//        if (pageTable1[p].valid) {
+//            TracePrintf(0, "vpn %d, valid %d, pfn %d\n", p, pageTable1[p].valid, pageTable1[p].pfn);
+//        }
+//
+//    }
+    
     // create an "idle" process to be run by the kernel when there are no other runnable (ready) processes in the system.
     // The process should be a loop that executes the Pause machine instruction on each iteration
     // Can be loaded from a file using LoadProgram, or have it "built into" the rest of the code
@@ -1672,7 +1698,7 @@ addToReadyQ (struct pcb *add) {
 //     svdPTE.pfn = pageTable1[PAGE_TABLE_LEN - 1].pfn;
 //     svdPTE.valid = pageTable1[PAGE_TABLE_LEN - 1].valid;
     
-//     char printThis[] = 
+//     char printThis[] =
 
 //     uintptr_t currPage = nextFreePage;
 //     pageTable1[PAGE_TABLE_LEN - 1].kprot = PROT_READ | PROT_WRITE;
