@@ -35,6 +35,13 @@ struct ttyMessageReceive {
     int length;
 };
 
+struct ttyMessageTransmit {
+    struct ttyMessageTransmit *next;
+    char *message;
+    int length;
+    struct pcb *fromPCB;
+};
+
 struct pcb {
     int pid;
     SavedContext *ctx;
@@ -82,6 +89,9 @@ uintptr_t nextVAforPageTable = VMEM_1_LIMIT - PAGESIZE * 2;
 
 struct ttyMessageReceive *ttyReceiveHeads[NUM_TERMINALS];
 struct ttyMessageReceive *ttyReceiveTails[NUM_TERMINALS];
+struct ttyMessageTransmit *ttyTransmitHeads[NUM_TERMINALS];
+struct ttyMessageTransmit *ttyTransmitTails[NUM_TERMINALS];
+bool ttyTransmitting[NUM_TERMINALS];
 
 int countargs;
 
@@ -103,7 +113,7 @@ int yalnix_getpid();
 int yalnix_brk(uintptr_t addr);
 int yalnix_delay(int clock_ticks);
 int yalnix_tty_read(int tty_id, void *buf, int len);
-int yalnix_tty_write();
+void yalnix_tty_write(int tty_id, void *buf, int len);
 
 void idle_process();
 int get_free_page();
@@ -179,7 +189,8 @@ void TRAP_KERNEL_handler(ExceptionInfo *info)
     } else if (code == YALNIX_TTY_READ) {
         result = yalnix_tty_read((int) info->regs[1], (void *) info->regs[2], (int) info->regs[3]);
     } else if (code == YALNIX_TTY_WRITE) {
-        result = yalnix_tty_write();
+        yalnix_tty_write((int) info->regs[1], (void *) info->regs[2], (int) info->regs[3]);
+        return;
     }  // if code not defined then not good
 
     info->regs[0] = result;
@@ -353,8 +364,17 @@ void TRAP_TTY_RECEIVE_handler(ExceptionInfo *info)
 
 void TRAP_TRANSMIT_handler(ExceptionInfo *info)
 {
-    TracePrintf(0, "In TRAP_TRANSMIT_handler\n");
-    Halt();
+    TracePrintf(0, "In TRAP_TRANSMIT_handler, pid: %d\n", active_pcb->pid);
+    // idx = get terminal number out from info
+    // if the queue for this idx is not empty (ttyTransmitHeads, ttyTransmitTails)
+        // take struct ttyMessageTransmit out of the queue
+        // do TtyTransmit with the struct
+        // remove the pcb in the ttyMessageTransmit out of the transmit-related block queue (not implemented yet)
+        // add that pcb into the ready queue
+        // free everything related to the struct
+    // if the queue for this idx is empty,
+        // that means that we don't have any messages to continue the cycle
+        // so we just set the boolean flag thing to false and return
     (void) info;
 }
 
@@ -911,14 +931,40 @@ int yalnix_tty_read(int tty_id, void *buf, int len) {
         }
         return len;
     }                
-                
-                
-                
 }
 
-int yalnix_tty_write() {
-    TracePrintf(0, "In yalnix_tty_write\n");
-    Halt();
+/*
+// make a struct thing to keep track of messages to be sent to the terminal (both head and tail) (done, ttyMessageTransmit)
+
+// make a boolean to keep track of if we're waiting on the hardware for a TRAP_TTY_TRANSMIT (done, ttyTrasnmitHeads, ttyTransmitTails)
+
+// initialize the array of bools and array of linked list head and tails in kernelstart (not done)
+// make blocked queue head for pcbs blocked on transmit (not done)
+*/
+
+void yalnix_tty_write(int tty_id, void *buf, int len) {
+    TracePrintf(0, "In yalnix_tty_write, pid: %d\n", active_pcb->pid);
+    // if len is larger than TERMINAL_MAX_LINE, return error ? (or do two messages?)
+    // malloc a char * size of len
+    // memcpy contents of buf into the malloced pointer
+    // if the flag for TRAP_TTY_TRANSMIT is set,
+        // malloc a struct ttyMessageTrasmit
+        // set message of struct to the malloced pointer
+        // set fromPCB of struct to active_pcb
+        // if ttyTransmitHeads[tty_id] is empty,
+            // set both head and tail to this new struct pointer
+        // else,
+            // insert this struct into the tail of the linked list
+
+        // add this struct to llist of pcbs blocked on tty transmits
+        // set active_pcb to idle or next ready
+        // context switch
+    // else,
+        // do TtyTransmit(tty_id, <malloced pointer>, len);
+        // set the boolean flag thing to true
+    (void)tty_id;
+    (void)buf;
+    (void)len;
 }
 
 
