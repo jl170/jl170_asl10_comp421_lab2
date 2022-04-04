@@ -91,6 +91,7 @@ struct ttyMessageReceive *ttyReceiveHeads[NUM_TERMINALS];
 struct ttyMessageReceive *ttyReceiveTails[NUM_TERMINALS];
 struct ttyMessageTransmit *ttyTransmitHeads[NUM_TERMINALS];
 struct ttyMessageTransmit *ttyTransmitTails[NUM_TERMINALS];
+struct ttyMessageTransmit *ttyTransmitFree[NUM_TERMINALS];
 bool ttyTransmitting[NUM_TERMINALS];
 
 int countargs;
@@ -343,7 +344,7 @@ void TRAP_TTY_RECEIVE_handler(ExceptionInfo *info)
     newMessage->next = NULL;
 
     if (ttyReceiveTails[ttyNum]) { // if not empty
-        // tail's next = this one 
+        // tail's next = this one
         ttyReceiveTails[ttyNum]->next = newMessage;
     } else {
         ttyReceiveHeads[ttyNum] = newMessage;
@@ -362,6 +363,9 @@ void TRAP_TTY_RECEIVE_handler(ExceptionInfo *info)
     }
 }
 
+/*
+ Indicates that one line of data has finished writing out to a terminal
+ */
 void TRAP_TRANSMIT_handler(ExceptionInfo *info)
 {
     TracePrintf(0, "In TRAP_TRANSMIT_handler, pid: %d\n", active_pcb->pid);
@@ -375,7 +379,55 @@ void TRAP_TRANSMIT_handler(ExceptionInfo *info)
     // if the queue for this idx is empty,
         // that means that we don't have any messages to continue the cycle
         // so we just set the boolean flag thing to false and return
-    (void) info;
+    
+    /*
+     a write call will be blocked on waiting for the terminal
+     in ttywrite, if we can't immediately transmit then put the message on the blocked queue
+     in TRAP_TRANSMIT_handler, check if message is no longer blocked
+     => get the next blocked pcb out of the blocked pcb queue
+     
+     struct pcb *write_blocked_heads[NUM_TERMINALS];
+     struct pcb *write_blocked_tails[NUM_TERMINALS];
+     
+     */
+    
+    
+        
+    int tty_id = info->code;
+    
+    if (ttyTransmitFree[tty_id]) {
+        free(ttyTransmitFree[tty_id]->message);
+        free(ttyTransmitFree[tty_id]);
+        ttyTransmitFree[tty_id] = NULL;
+    }
+
+    
+    if (ttyTransmitHeads[tty_id]) {  // queue is not empty, there are messages
+        struct ttyMessageTransmit *nextTransmitMsg;
+        // pop next transmit message from queue
+        if (ttyTransmitHeads[tty_id] == ttyTransmitTails[tty_id]) {
+            nextTransmitMsg = ttyTransmitHeads[tty_id];
+            ttyTransmitTails[tty_id] = NULL;
+            ttyTransmitHeads[tty_id] = NULL;
+        } else {
+            nextTransmitMsg = ttyTransmitHeads[tty_id];
+            ttyTransmitHeads[tty_id] = ttyTransmitHeads[tty_id]->next;
+            nextTransmitMsg->next = NULL;
+        }
+        
+        TtyTransmit(tty_id, nextTransmitMsg->message, nextTransmitMsg->length);
+        // nextTransmitMsg pcb is no longer blocked- remove and put on ready queue  TODO: actually do we even need blocked queue?
+        struct pcb *msgPcb = nextTransmitMsg->fromPCB;
+        msgPcb->next = NULL;
+        addToReadyQ(msgPcb);
+        ttyTransmitFree[tty_id] = nextTransmitMsg;
+        // free everything related to the nextTransmitMsg struct
+        // TODO: what if TtyTransmit finishes after freeing- maybe save struct to free and free on next call?
+        
+    } else {  // queue is empty- no more messages, end transmit cycle
+        ttyTransmitting[tty_id] = false;
+    }
+    
 }
 
 // procedures for Yalnix kernel calls
@@ -678,7 +730,11 @@ void yalnix_exit(int status) {
             if (read_blocked_heads[i]) {
                 die = false;
             }
+            if (ttyTransmitHeads[i]) {
+                die = false;
+            }
         }
+        
         if (next_delay_pcb == NULL && wait_pcb_head == NULL && die) {
             TracePrintf(0, "No ready, no delayed processes. Bye Bye!\n");
             // NEED TODO? free idle
@@ -907,7 +963,7 @@ int yalnix_tty_read(int tty_id, void *buf, int len) {
     struct ttyMessageReceive *currMessage = ttyReceiveHeads[tty_id];
     // now read line out of message struct thing
     if (len >= currMessage->length) { // if len is greater than or equal to the head message's length,
-        memcpy(buf, (void *)currMessage->message, currMessage->length); // then memcpy the entire message into buf, 
+        memcpy(buf, (void *)currMessage->message, currMessage->length); // then memcpy the entire message into buf,
         ttyReceiveHeads[tty_id] = ttyReceiveHeads[tty_id]->next; // update head of queue
         if (!ttyReceiveHeads[tty_id]) {
             ttyReceiveTails[tty_id] = NULL;
@@ -920,7 +976,7 @@ int yalnix_tty_read(int tty_id, void *buf, int len) {
         memcpy(buf, (void *)currMessage->message, len); // then memcpy only len bytes into buf,
         char *remMessage = malloc(currMessage->length - len); // malloc another char* for the remaining message
         memcpy((void *) remMessage, (void *) &currMessage->message[len], currMessage->length - len); // memcpy remaining message into malloced pointer,
-        currMessage->length = currMessage->length - len; 
+        currMessage->length = currMessage->length - len;
         free(currMessage->message); // free original message char *
         currMessage->message = remMessage;
 
@@ -930,7 +986,7 @@ int yalnix_tty_read(int tty_id, void *buf, int len) {
             addToReadyQ(movePCB);
         }
         return len;
-    }                
+    }
 }
 
 /*
@@ -944,7 +1000,7 @@ int yalnix_tty_read(int tty_id, void *buf, int len) {
 
 void yalnix_tty_write(int tty_id, void *buf, int len) {
     TracePrintf(0, "In yalnix_tty_write, pid: %d\n", active_pcb->pid);
-    // if len is larger than TERMINAL_MAX_LINE, return error ? (or do two messages?)
+    // if len is larger than TERMINAL_MAX_LINE, return error ? (or do two messages?) via piazza: an error
     // malloc a char * size of len
     // memcpy contents of buf into the malloced pointer
     // if the flag for TRAP_TTY_TRANSMIT is set,
@@ -965,6 +1021,50 @@ void yalnix_tty_write(int tty_id, void *buf, int len) {
     (void)tty_id;
     (void)buf;
     (void)len;
+    
+    // TODO: ttyTransmitFree[tty_id] = NULL;
+    
+    if (len < 0 || len > TERMINAL_MAX_LINE) {
+        TracePrintf(0, "yalnix_tty_write ERROR input len is %d\n", len);
+        Halt();
+    }
+    
+    char *message = malloc(len);
+    memcpy((void *) message, (void *) buf, len);
+    struct ttyMessageTransmit *newMessage = malloc(sizeof(struct ttyMessageTransmit));
+    newMessage->message = message;
+    if (ttyTransmitting[tty_id]) {  // terminal is currently in transmit loop- pcb should be blocked
+        newMessage->length = len;
+        newMessage->fromPCB = active_pcb;
+        // add to llist
+        if (ttyTransmitHeads[tty_id]) {
+            // insert this struct into the tail of the linked list
+            ttyTransmitTails[tty_id]->next = newMessage;
+            ttyTransmitTails[tty_id] = newMessage;
+            
+        } else {  // if ttyTransmitHeads[tty_id] is empty
+            ttyTransmitHeads[tty_id] = newMessage;  // set both head and tail to this new struct pointer
+            ttyTransmitTails[tty_id] = newMessage;
+        }
+        // set active_pcb to idle or next ready
+        struct pcb *next = popFromReadyQ();
+        struct pcb *old = active_pcb;
+        if (next) {
+            active_pcb = next;
+        } else {
+            active_pcb = idle_pcb;
+        }
+        // context switch
+        ContextSwitch(mySwitchFuncNormal, old->ctx, old, active_pcb);
+        
+    } else {  // terminal not in transmit loop, start
+        // TODO: if last call is to ttyTransmit, could die before interrupt occurs
+        TtyTransmit(tty_id, (void *) message, len);
+        ttyTransmitFree[tty_id] = newMessage;
+    }
+    
+    
+    
 }
 
 
@@ -1305,6 +1405,7 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
         ttyReceiveTails[i] = NULL;
         read_blocked_heads[i] = NULL;
         read_blocked_tails[i] = NULL;
+        ttyTransmitFree[i] = NULL;
     }
     
     // loadprogram for idle
