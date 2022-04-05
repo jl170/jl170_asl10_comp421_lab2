@@ -114,7 +114,7 @@ int yalnix_getpid();
 int yalnix_brk(uintptr_t addr);
 int yalnix_delay(int clock_ticks);
 int yalnix_tty_read(int tty_id, void *buf, int len);
-void yalnix_tty_write(int tty_id, void *buf, int len);
+int yalnix_tty_write(int tty_id, void *buf, int len);
 
 void idle_process();
 int get_free_page();
@@ -190,8 +190,7 @@ void TRAP_KERNEL_handler(ExceptionInfo *info)
     } else if (code == YALNIX_TTY_READ) {
         result = yalnix_tty_read((int) info->regs[1], (void *) info->regs[2], (int) info->regs[3]);
     } else if (code == YALNIX_TTY_WRITE) {
-        yalnix_tty_write((int) info->regs[1], (void *) info->regs[2], (int) info->regs[3]);
-        return;
+        result = yalnix_tty_write((int) info->regs[1], (void *) info->regs[2], (int) info->regs[3]);
     }  // if code not defined then not good
 
     info->regs[0] = result;
@@ -998,7 +997,7 @@ int yalnix_tty_read(int tty_id, void *buf, int len) {
 // make blocked queue head for pcbs blocked on transmit (not done)
 */
 
-void yalnix_tty_write(int tty_id, void *buf, int len) {
+int yalnix_tty_write(int tty_id, void *buf, int len) {
     TracePrintf(0, "In yalnix_tty_write, pid: %d\n", active_pcb->pid);
     // if len is larger than TERMINAL_MAX_LINE, return error ? (or do two messages?) via piazza: an error
     // malloc a char * size of len
@@ -1026,7 +1025,7 @@ void yalnix_tty_write(int tty_id, void *buf, int len) {
     
     if (len < 0 || len > TERMINAL_MAX_LINE) {
         TracePrintf(0, "yalnix_tty_write ERROR input len is %d\n", len);
-        Halt();
+        return ERROR;
     }
     
     char *message = malloc(len);
@@ -1062,9 +1061,7 @@ void yalnix_tty_write(int tty_id, void *buf, int len) {
         TtyTransmit(tty_id, (void *) message, len);
         ttyTransmitFree[tty_id] = newMessage;
     }
-    
-    
-    
+    return len;
 }
 
 
