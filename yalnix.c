@@ -520,6 +520,7 @@ int yalnix_fork() {
             currPTNode = currPTNode->next;
             if (currPTNode == NULL) {
                 TracePrintf(0, "Fork: VERY BAD: reached end of ptNodes but found no empty slot\n");
+                printf("Fork: VERY BAD: reached end of ptNodes but found no empty slot\n");
                 Halt();
             }
         }
@@ -533,6 +534,7 @@ int yalnix_fork() {
             currPTNode->valid[1] = 1;
         } else {
             TracePrintf(0, "Fork: VERY BAD: no empty slot!!\n");
+            printf("Fork: VERY BAD: no empty slot!!\n");
             Halt();
         }
         childPCB->ptNode = currPTNode;
@@ -943,6 +945,7 @@ int yalnix_brk(uintptr_t addr) {
     TracePrintf(0, "In yalnix_brk\n");
     
     if (addr >= USER_STACK_LIMIT) {
+        printf("yalnix_brk: addr %d is invalid\n", (int) addr);
         return ERROR;
     }
     
@@ -1010,6 +1013,17 @@ Create block queues
 */
 
 int yalnix_tty_read(int tty_id, void *buf, int len) {
+    
+    if (len < 0) {
+        printf("yalnix_tty_read: ERROR attempted to read %d bytes\n", len);
+        return ERROR;
+    }
+    
+    if (tty_id < 0 || tty_id >= NUM_TERMINALS) {
+        printf("yalnix_tty_read: ERROR tty_id is %d\n", tty_id);
+        return ERROR;
+    }
+    
     TracePrintf(0, "In yalnix_tty_read\n");
     // check if there is something in ttyReceiveHeads
     if (!ttyReceiveHeads[tty_id]) { // if not, add to block queue
@@ -1095,8 +1109,13 @@ int yalnix_tty_write(int tty_id, void *buf, int len) {
     
     // TODO: ttyTransmitFree[tty_id] = NULL;
     
+    if (tty_id < 0 || tty_id >= NUM_TERMINALS) {
+        printf("yalnix_tty_write: ERROR tty_id is %d\n", tty_id);
+        return ERROR;
+    }
+    
     if (len < 0 || len > TERMINAL_MAX_LINE) {
-        TracePrintf(0, "yalnix_tty_write ERROR input len is %d\n", len);
+        printf("yalnix_tty_write: ERROR input len is %d\n", len);
         return ERROR;
     }
     
@@ -1524,6 +1543,7 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
  */
 int get_free_page() {
     if (freePages <= 0) {
+        printf("attempt to get new free page failed, no more free pages available\n");
         return -1;
     }
     
