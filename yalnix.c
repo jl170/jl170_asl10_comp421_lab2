@@ -703,6 +703,7 @@ void yalnix_exit(int status) {
         struct exitedChild *eChild = malloc(sizeof(struct exitedChild));
         eChild->pid = active_pcb->pid;
         eChild->exitStatus = status;
+        eChild->next = NULL;
 
         // take this pcb out of the parent's children list
         if (active_pcb->parent->children->childPCB == active_pcb) {
@@ -869,6 +870,12 @@ int yalnix_wait(int *status_ptr) {
 
     // if a child process has already exited (if next_exit != NULL)
     if (active_pcb->exitedChildHead) {
+//        TracePrintf(0, "yalnix_wait: status_ptr: %d\n", (uintptr_t) status_ptr);
+//        TracePrintf(0, "yalnix_wait: *status_ptr: %d\n", *status_ptr);
+        TracePrintf(0, "yalnix_wait: pid: %d\n", active_pcb->exitedChildHead->pid);
+
+        TracePrintf(0, "yalnix_wait: exitStatus: %d\n", active_pcb->exitedChildHead->exitStatus);
+    
         *status_ptr = active_pcb->exitedChildHead->exitStatus;
         int childpid = active_pcb->exitedChildHead->pid;
 
@@ -876,6 +883,9 @@ int yalnix_wait(int *status_ptr) {
         struct exitedChild *nextHead = active_pcb->exitedChildHead->next;
         free(active_pcb->exitedChildHead);
         active_pcb->exitedChildHead = nextHead;
+        if (active_pcb->exitedChildHead == NULL) {
+            active_pcb->exitedChildTail = NULL;
+        }
 
         return childpid;
     }
