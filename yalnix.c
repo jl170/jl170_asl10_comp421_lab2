@@ -286,8 +286,38 @@ void TRAP_CLOCK_handler(ExceptionInfo *info)
 void TRAP_ILLEGAL_handler(ExceptionInfo *info)
 {
     TracePrintf(0, "\n\nIn TRAP_ILLEGAL_handler\n");
-    Halt();
-    (void) info;
+    
+    int code = info->code;
+    if (code == TRAP_ILLEGAL_ILLOPC) {
+        printf("TRAP_ILLEGAL_ILLOPC in process %d: Illegal opcode\n", active_pcb->pid);
+    } else if (code == TRAP_ILLEGAL_ILLOPN) {
+        printf("TRAP_ILLEGAL_ILLOPN in process %d: Illegal operand\n", active_pcb->pid);
+    } else if (code == TRAP_ILLEGAL_ILLADR) {
+        printf("TRAP_ILLEGAL_ILLADR in process %d: Illegal addressing mode\n", active_pcb->pid);
+    } else if (code == TRAP_ILLEGAL_ILLTRP) {
+        printf("TRAP_ILLEGAL_ILLTRP in process %d: Illegal software trap\n", active_pcb->pid);
+    } else if (code == TRAP_ILLEGAL_PRVOPC) {
+        printf("TRAP_ILLEGAL_PRVOPC in process %d: Privileged opcode\n", active_pcb->pid);
+    } else if (code == TRAP_ILLEGAL_PRVREG) {
+        printf("TRAP_ILLEGAL_PRVREG in process %d: Privileged register\n", active_pcb->pid);
+    } else if (code == TRAP_ILLEGAL_COPROC) {
+        printf("TRAP_ILLEGAL_COPROC in process %d: Coprocessor error\n", active_pcb->pid);
+    } else if (code == TRAP_ILLEGAL_BADSTK) {
+        printf("TRAP_ILLEGAL_BADSTK in process %d: Bad stack\n", active_pcb->pid);
+    } else if (code == TRAP_ILLEGAL_KERNELI) {
+        printf("TRAP_ILLEGAL_KERNELI in process %d: Linux kernel sent SIGILL\n", active_pcb->pid);
+    } else if (code == TRAP_ILLEGAL_USERIB) {
+        printf("TRAP_ILLEGAL_USERIB in process %d: Received SIGILL or SIGBUS from user\n", active_pcb->pid);
+    } else if (code == TRAP_ILLEGAL_ADRALN) {
+        printf("TRAP_ILLEGAL_ADRALN in process %d: Invalid address alignment\n", active_pcb->pid);
+    } else if (code == TRAP_ILLEGAL_ADRERR) {
+        printf("TRAP_ILLEGAL_ADRERR in process %d: Non-existent physical address\n", active_pcb->pid);
+    } else if (code == TRAP_ILLEGAL_OBJERR) {
+        printf("TRAP_ILLEGAL_OBJERR in process %d: Object-specific HW error\n", active_pcb->pid);
+    } else if (code == TRAP_ILLEGAL_KERNELB) {
+        printf("TRAP_ILLEGAL_KERNELB in process %d: Linux kernel sent SIGBUS\n", active_pcb->pid);
+    }
+    yalnix_exit(ERROR);
 }
 
 void TRAP_MEMORY_handler(ExceptionInfo *info)
@@ -306,18 +336,50 @@ void TRAP_MEMORY_handler(ExceptionInfo *info)
             WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) (active_pcb->stackAddr));
         }
 
-    } else {
-        // In all other cases, terminate the process
+    } else {  // In all other cases, terminate the process
         TracePrintf(0, "In TRAP_MEMORY_handler else\n" );
-        Halt();
+        int code = info->code;
+        if (code == TRAP_MEMORY_MAPERR) {
+            printf("TRAP_MEMORY_MAPERR in process %d: No mapping at addr %d\n", active_pcb->pid, (int) (uintptr_t) info->addr);
+        } else if (code == TRAP_MEMORY_ACCERR) {
+            printf("TRAP_MEMORY_ACCERR in process %d: Protection violation at addr %d\n", active_pcb->pid, (int) (uintptr_t) info->addr);
+        } else if (code == TRAP_MEMORY_KERNEL) {
+            printf("TRAP_MEMORY_KERNEL in process %d: Linux kernel sent SIGSEGV at addr %d\n", active_pcb->pid, (int) (uintptr_t) info->addr);
+        } else if (code == TRAP_MEMORY_USER) {
+            printf("TRAP_MEMORY_USER in process %d: Received SIGSEGV from user\n", active_pcb->pid);
+        }
+        yalnix_exit(ERROR);
     }
 }
 
 void TRAP_MATH_handler(ExceptionInfo *info)
 {
     TracePrintf(0, "\n\nIn TRAP_MATH_handler\n");
-    Halt();
-    (void) info;
+    
+    int code = info->code;
+    
+    if (code == TRAP_MATH_INTDIV) {
+        printf("TRAP_MATH_INTDIV in process %d: Integer divide by zero\n", active_pcb->pid);
+    } else if (code == TRAP_MATH_INTOVF) {
+        printf("TRAP_MATH_INTOVF in process %d: Integer overflow\n", active_pcb->pid);
+    } else if (code == TRAP_MATH_FLTDIV) {
+        printf("TRAP_MATH_FLTDIV in process %d: Floating divide by zero\n", active_pcb->pid);
+    } else if (code == TRAP_MATH_FLTOVF) {
+        printf("TRAP_MATH_FLTOVF in process %d: Floating overflow\n", active_pcb->pid);
+    } else if (code == TRAP_MATH_FLTUND) {
+        printf("TRAP_MATH_FLTUND in process %d: Floating underflow\n", active_pcb->pid);
+    } else if (code == TRAP_MATH_FLTRES) {
+        printf("TRAP_MATH_FLTRES in process %d: Floating inexact result\n", active_pcb->pid);
+    } else if (code == TRAP_MATH_FLTINV) {
+        printf("TRAP_MATH_FLTINV in process %d: Invalid floating operation\n", active_pcb->pid);
+    } else if (code == TRAP_MATH_FLTSUB) {
+        printf("TRAP_MATH_FLTSUB in process %d: FP subscript out of range\n", active_pcb->pid);
+    } else if (code == TRAP_MATH_KERNEL) {
+        printf("TRAP_MATH_KERNEL in process %d: Linux kernel sent SIGFPE\n", active_pcb->pid);
+    } else if (code == TRAP_MATH_USER) {
+        printf("TRAP_MATH_USER in process %d: Received SIGFPE from user\n", active_pcb->pid);
+    }
+    yalnix_exit(ERROR);
 }
 
 void TRAP_TTY_RECEIVE_handler(ExceptionInfo *info)
