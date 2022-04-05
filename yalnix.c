@@ -1122,6 +1122,7 @@ int yalnix_tty_write(int tty_id, void *buf, int len) {
         // TODO: if last call is to ttyTransmit, could die before interrupt occurs
         TtyTransmit(tty_id, (void *) message, len);
         ttyTransmitFree[tty_id] = newMessage;
+        ttyTransmitting[tty_id] = true;
     }
     return len;
 }
