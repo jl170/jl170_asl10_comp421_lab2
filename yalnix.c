@@ -107,7 +107,7 @@ void TRAP_TTY_RECEIVE_handler(ExceptionInfo *info);
 void TRAP_TRANSMIT_handler(ExceptionInfo *info);
 
 int yalnix_fork();
-void yalnix_exec(ExceptionInfo *info, char *filename, char **argvec);
+int yalnix_exec(ExceptionInfo *info, char *filename, char **argvec);
 void yalnix_exit(int status);
 int yalnix_wait(int *status_ptr);
 int yalnix_getpid();
@@ -174,8 +174,10 @@ void TRAP_KERNEL_handler(ExceptionInfo *info)
     if (code == YALNIX_FORK) {
         result = yalnix_fork();
     } else if (code == YALNIX_EXEC) {
-        yalnix_exec(info, (char *) info->regs[1], (char **) info->regs[2]);
-        return;
+        result = yalnix_exec(info, (char *) info->regs[1], (char **) info->regs[2]);
+        if (result != -1) {
+            return;
+        }
     } else if (code == YALNIX_EXIT) {
         yalnix_exit((int) info->regs[1]);  // TODO: exit has no return
         return;
@@ -679,13 +681,17 @@ mySwitchFuncFork(SavedContext *ctxp, void *p1, void *p2) {
     return child->ctx;
 }
     
-void yalnix_exec(ExceptionInfo *info, char *filename, char **argvec) {
+int yalnix_exec(ExceptionInfo *info, char *filename, char **argvec) {
     TracePrintf(0, "In yalnix_exec pid: %d\n", active_pcb->pid);
 
-    LoadProgram(filename, argvec, info, active_pcb);
+    int ret = LoadProgram(filename, argvec, info, active_pcb);
+    if (ret == -1) {
+        return ret;
+    }
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
 
     TracePrintf(0, "Finished yalnix_exec\n");
+    return 0;
     //Halt();
 }
 
@@ -1480,6 +1486,12 @@ void KernelStart(ExceptionInfo *info, unsigned int pmem_size, void *orig_brk, ch
     //ExceptionInfo *info2 = malloc(sizeof(ExceptionInfo));
     //LoadProgram(cmd_args[0], cmd_args, info2, active_pcb);
     //TracePrintf(0, "idle: %d, init: %d, active; %d\n", (uintptr_t) idle_pcb, (uintptr_t) init_pcb, (uintptr_t) active_pcb);
+    
+    if (cmd_args[0] == NULL) {
+        cmd_args[0] = "init";
+        cmd_args[1] = NULL;
+    }
+    
     LoadProgram(cmd_args[0], cmd_args, info, active_pcb);
     
     WriteRegister(REG_TLB_FLUSH, (RCS421RegVal) TLB_FLUSH_ALL);
