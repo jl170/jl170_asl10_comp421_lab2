@@ -134,6 +134,8 @@ SavedContext *mySwitchFuncFork(SavedContext *ctxp, void *p1, void *p2);
 void printPT(struct pte *PT, int printValid);
 void printPCBInfo(struct pcb *pcb1);
 void printCurrentState();
+int string_verify(char *string, int len);
+int verify_access(void *buf, int len);
 
 struct pcb *
 createDefaultPCB() {
@@ -193,7 +195,10 @@ void TRAP_KERNEL_handler(ExceptionInfo *info)
         result = yalnix_tty_read((int) info->regs[1], (void *) info->regs[2], (int) info->regs[3]);
     } else if (code == YALNIX_TTY_WRITE) {
         result = yalnix_tty_write((int) info->regs[1], (void *) info->regs[2], (int) info->regs[3]);
-    }  // if code not defined then not good
+    } else {  // if code not defined then not good
+        printf("TRAP_KERNEL_HANDLER code %d not defined\n", code);
+        return;
+    }
 
     info->regs[0] = result;
 }
@@ -349,6 +354,8 @@ void TRAP_MEMORY_handler(ExceptionInfo *info)
             printf("TRAP_MEMORY_KERNEL in process %d: Linux kernel sent SIGSEGV at addr %d\n", active_pcb->pid, (int) (uintptr_t) info->addr);
         } else if (code == TRAP_MEMORY_USER) {
             printf("TRAP_MEMORY_USER in process %d: Received SIGSEGV from user\n", active_pcb->pid);
+        } else {
+            printf("TRAP_MEMORY in process %d: ERROR call failed, no more memory\n", active_pcb->pid);
         }
         yalnix_exit(ERROR);
     }
@@ -432,29 +439,6 @@ void TRAP_TTY_RECEIVE_handler(ExceptionInfo *info)
 void TRAP_TRANSMIT_handler(ExceptionInfo *info)
 {
     TracePrintf(0, "In TRAP_TRANSMIT_handler, pid: %d\n", active_pcb->pid);
-    // idx = get terminal number out from info
-    // if the queue for this idx is not empty (ttyTransmitHeads, ttyTransmitTails)
-        // take struct ttyMessageTransmit out of the queue
-        // do TtyTransmit with the struct
-        // remove the pcb in the ttyMessageTransmit out of the transmit-related block queue (not implemented yet)
-        // add that pcb into the ready queue
-        // free everything related to the struct
-    // if the queue for this idx is empty,
-        // that means that we don't have any messages to continue the cycle
-        // so we just set the boolean flag thing to false and return
-    
-    /*
-     a write call will be blocked on waiting for the terminal
-     in ttywrite, if we can't immediately transmit then put the message on the blocked queue
-     in TRAP_TRANSMIT_handler, check if message is no longer blocked
-     => get the next blocked pcb out of the blocked pcb queue
-     
-     struct pcb *write_blocked_heads[NUM_TERMINALS];
-     struct pcb *write_blocked_tails[NUM_TERMINALS];
-     
-     */
-    
-    
         
     int tty_id = info->code;
     
@@ -573,24 +557,6 @@ int yalnix_fork() {
     childPCB->brkAddr = active_pcb->brkAddr;
     childPCB->stackAddr = active_pcb->stackAddr;
     childPCB->delay = 0;
-    
-    // struct pcb {
-    // SavedContext *ctx;
-    // struct pcb *next;
-
-    // copy parent kernel stack including exception info
-
-    // copy text data bss heap
-
-    // allocate new memory for child process
-    // copy parent address space into child
-    
-    // create a new region 0 page table
-    // That means Region 0 page tables must be dynamically allocated and initialized (but, be careful, you cannot use malloc for this).
-    
-    // ExceptionInfo is on the kernel stack, and each process has its own kernel stack, so each has its own ExceptionInfo.  You don't ever need to save and restore the ExecptionInfo
-    
-    // return” in both processes by scheduling both to run in our queue(s)
 
     // initialize and assign activeChild struct
     struct activeChild *activeChildStruct = malloc(sizeof(struct activeChild));
@@ -900,42 +866,6 @@ int yalnix_wait(int *status_ptr) {
     
     TracePrintf(0, "yalnix_wait: BOOKEEPING ERROR\n");
     Halt();
-    // if a child process has already exited (if next_exit != NULL)
-        // get exit status, etc. from exited_child struct
-        // update exited children llist (remove child from next_exit llist)
-        // return child process's exit status information
-    
-    // if no child processes have exited yet (next_exit == NULL)
-        // block until next child exits/terminated
-        // add pcb to blocked queue- need to have specific wait_block queue, check in clock handler
-        // set new active pcb, context switch to it? (or handle null active pcb)
-    
-    /*
-     each process (pcb) needs to know
-        state (running/exited) of each child
-        exit status and pid of exited children
-        its parent (to update info when exit)
-        
-     struct exited_child {
-        int state = 0;
-        int pid = 0;
-        exit status;
-        struct *exit_info next;
-     }
-     
-     add to pcb:    struct exited_child *next_exit; // llist of exited children and their status/pid
-                    maybe also a tail bc this needs to be a queue
-                    struct pcb *run_children; llist of running children
-                    struct pcb *next_child;
-                    struct pcb *parent; // pointer to parent
-                    
-     
-     or might be better to just make an exit_status struct that all pcbs have
-        state, pid, exit status, child llist, parent
-     
-     ** make sure to update new pcb fields for idle, init **
-        
-     */
     
 }
 
@@ -1012,7 +942,7 @@ int yalnix_delay(int clock_ticks) {
 
 int yalnix_tty_read(int tty_id, void *buf, int len) {
     
-    if (len < 0) {
+    if (len < 0 || len > TERMINAL_MAX_LINE) {
         printf("yalnix_tty_read: ERROR attempted to read %d bytes\n", len);
         return ERROR;
     }
@@ -1021,6 +951,17 @@ int yalnix_tty_read(int tty_id, void *buf, int len) {
         printf("yalnix_tty_read: ERROR tty_id is %d\n", tty_id);
         return ERROR;
     }
+    
+    if (buf == NULL) {
+        printf("yalnix_tty_read: ERROR buff is NULL\n");
+        return ERROR;
+    }
+    
+//    int error = verify_access(buf, len);
+//    if (error == -1) {
+//        printf("yalnix_tty_read: buffer access failed\n");
+//        return ERROR;
+//    }
     
     TracePrintf(0, "In yalnix_tty_read\n");
     // check if there is something in ttyReceiveHeads
@@ -1083,30 +1024,11 @@ int yalnix_tty_read(int tty_id, void *buf, int len) {
 
 int yalnix_tty_write(int tty_id, void *buf, int len) {
     TracePrintf(0, "In yalnix_tty_write, pid: %d\n", active_pcb->pid);
-    // if len is larger than TERMINAL_MAX_LINE, return error ? (or do two messages?) via piazza: an error
-    // malloc a char * size of len
-    // memcpy contents of buf into the malloced pointer
-    // if the flag for TRAP_TTY_TRANSMIT is set,
-        // malloc a struct ttyMessageTrasmit
-        // set message of struct to the malloced pointer
-        // set fromPCB of struct to active_pcb
-        // if ttyTransmitHeads[tty_id] is empty,
-            // set both head and tail to this new struct pointer
-        // else,
-            // insert this struct into the tail of the linked list
 
-        // add this struct to llist of pcbs blocked on tty transmits
-        // set active_pcb to idle or next ready
-        // context switch
-    // else,
-        // do TtyTransmit(tty_id, <malloced pointer>, len);
-        // set the boolean flag thing to true
-    (void)tty_id;
-    (void)buf;
-    (void)len;
-    
-    // TODO: ttyTransmitFree[tty_id] = NULL;
-    
+//    (void)tty_id;
+//    (void)buf;
+//    (void)len;
+        
     if (tty_id < 0 || tty_id >= NUM_TERMINALS) {
         printf("yalnix_tty_write: ERROR tty_id is %d\n", tty_id);
         return ERROR;
@@ -1116,6 +1038,18 @@ int yalnix_tty_write(int tty_id, void *buf, int len) {
         printf("yalnix_tty_write: ERROR input len is %d\n", len);
         return ERROR;
     }
+    
+//    int error = verify_access(buf, len);
+//    if (error == -1) {
+//        printf("yalnix_tty_write: ERROR verify access failed\n");
+//        return ERROR;
+//    }
+    
+//    int error = string_verify((char *)buf, len);
+//    if (error == -1) {
+//        printf("yalnix_tty_write: ERROR string verification failed\n");
+//        return ERROR;
+//    }
     
     char *message = malloc(len);
     memcpy((void *) message, (void *) buf, len);
@@ -2062,5 +1996,65 @@ popFromQ(struct pcb **head, struct pcb **tail) {
         ret->next = NULL;
         return ret;
     }
+}
+
+/*
+ verifies a string
+ */
+int string_verify(char *string, int len) {
+    if (string == NULL) {
+        TracePrintf(0, "string is null\n");
+        return -1;
+    }
+
+    int i;
+    for (i = 0; i < len - 1; i++) {
+        if (!(string[i])) {
+            TracePrintf(0, "string[i] is null\n");
+            return -1;
+        }
+    }
+    
+    if (!string[len-1] || string[len-1] == '\0') {
+        
+        return 0;
+    }
+    TracePrintf(0, "string doesn't terminate\n");
+    return -1;
+}
+
+/*
+ verifies a string
+ */
+int verify_access(void *buf, int len) {
+    // for each page buf is in
+    int pos;
+    for (pos = 0; pos < len; pos += PAGESIZE) {
+        int page = (DOWN_TO_PAGE((((uintptr_t) buf) + pos))) >> PAGESHIFT;
+        TracePrintf(0, "issue on page %d\n", page);
+        if (page < 0 || page >= (KERNEL_STACK_LIMIT >> PAGESHIFT)) {
+            TracePrintf(0, "not in region 0 %d\n");
+            return -1;
+        }
+        // check valid
+        if (!active_pcb->PT0[page].valid) {  // check permissions
+            TracePrintf(0, "not valid %d\n");
+            return -1;
+        }
+//        if (active_pcb->PT0[page].uprot != (PROT_READ | PROT_WRITE) && active_pcb->PT0[page].uprot != (PROT_READ | PROT_WRITE | PROT_EXEC)) {
+//            return -1;
+//        }
+        if (((active_pcb->PT0[page].uprot) & PROT_READ) == 0) {
+            if (((active_pcb->PT0[page].uprot) & PROT_WRITE) == 0) {
+                TracePrintf(0, "can't access%d\n");
+                return -1;
+            }
+            TracePrintf(0, "can't access2%d\n");
+            return -1;
+        }
+            
+    }
+    
+    return 0;
 }
 
